@@ -1,0 +1,14 @@
+{
+  "name": "invariant",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Agent behavioral consistency and regression testing harness.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "validate": "npm run validate -w @invariant/cli",
+    "invariant": "npm run start -w @invariant/cli --"
+  },
+  "license": "UNLICENSED"
+}

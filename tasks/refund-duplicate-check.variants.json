@@ -1,0 +1,13 @@
+{
+  "task": "refund-duplicate-check",
+  "fixture_version": 1,
+  "generated_at": "2026-09-19T00:00:00Z",
+  "approved_by": "athul",
+  "variants": [
+    { "id": "v1", "text": "Refund order #1234, it was already refunded last week I think." },
+    { "id": "v2", "text": "Can you refund #1234? Pretty sure it went through already, not certain." },
+    { "id": "v3", "text": "Process a refund for order 1234. Might be a duplicate, not sure though." },
+    { "id": "v4", "text": "I need a refund on order 1234, although I have a feeling this was handled already." },
+    { "id": "v5", "text": "Please issue a refund for #1234, there's a chance it's already been refunded, I'm not fully sure." }
+  ]
+}

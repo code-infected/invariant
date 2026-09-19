@@ -1,0 +1,11 @@
+# Local-only reference material. Never committed.
+internal-docs/
+
+# node
+node_modules/
+dist/
+*.tsbuildinfo
+
+# env
+.env
+.env.local

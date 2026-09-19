@@ -1,0 +1,12 @@
+providers:
+  retry:
+    max_attempts: 3
+    retry_on: [429, 503, "timeout"]
+execution:
+  worker_concurrency: 8
+  default_tier: smoke
+judge:
+  temperature: 0
+  votes: 3
+  embedding_prefilter_threshold_high: 0.95
+  embedding_prefilter_threshold_low: 0.40

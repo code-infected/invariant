@@ -1,0 +1,13 @@
+{
+  "task": "research-citation-integrity",
+  "fixture_version": 1,
+  "generated_at": "2026-09-19T00:00:00Z",
+  "approved_by": "athul",
+  "variants": [
+    { "id": "v1", "text": "Give me a short summary of the current adoption rate of Rust in production backend systems, with sources." },
+    { "id": "v2", "text": "Can you summarize how widely Rust is being adopted for production backend systems right now? Include sources." },
+    { "id": "v3", "text": "I want a brief rundown on Rust's adoption in production backends today, cited please." },
+    { "id": "v4", "text": "Summarize where Rust adoption stands for backend production systems currently, and cite your sources." },
+    { "id": "v5", "text": "What's the current state of Rust adoption in production backend systems? Keep it short, with sources." }
+  ]
+}
