@@ -13,3 +13,6 @@ export function taskSpecPath(name: string): string {
 export function variantFixturePath(name: string): string {
   return path.join(TASKS_DIR, `${name}.variants.json`);
 }
+
+/** Runtime data (trace db, raw traces, scratch proxy configs). Gitignored, never source. */
+export const INVARIANT_DIR = path.join(REPO_ROOT, ".invariant");

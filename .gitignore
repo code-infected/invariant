@@ -6,6 +6,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# runtime data: local trace store (sqlite) and raw trace blobs
+.invariant/
+
 # env
 .env
 .env.local

@@ -7,6 +7,8 @@
     "packages/*"
   ],
   "scripts": {
+    "build": "npm run build -w @invariant/trace-store && npm run build -w @invariant/toy-tool-server && npm run build -w @invariant/mcp-proxy && npm run build -w @invariant/agent-driver && npm run build -w @invariant/cli",
+    "test": "npm run build && npm test -w @invariant/mcp-proxy && npm test -w @invariant/agent-driver",
     "validate": "npm run validate -w @invariant/cli",
     "invariant": "npm run start -w @invariant/cli --"
   },

@@ -1,0 +1,29 @@
+{
+  "name": "@invariant/mcp-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./bin": "./dist/bin.js"
+  },
+  "bin": {
+    "invariant-mcp-proxy": "./dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test dist"
+  },
+  "dependencies": {
+    "@invariant/trace-store": "*",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@invariant/toy-tool-server": "*",
+    "@types/node": "^22.5.0",
+    "typescript": "^5.5.4"
+  }
+}

@@ -12,6 +12,10 @@
     "validate": "tsx src/index.ts validate"
   },
   "dependencies": {
+    "@invariant/agent-driver": "*",
+    "@invariant/mcp-proxy": "*",
+    "@invariant/toy-tool-server": "*",
+    "@invariant/trace-store": "*",
     "commander": "^12.1.0",
     "yaml": "^2.5.0",
     "zod": "^3.23.8"

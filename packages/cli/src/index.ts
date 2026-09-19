@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { runValidate } from "./commands/validate.js";
 import { runInit } from "./commands/init.js";
 import { runVariantsRegen } from "./commands/variants-regen.js";
+import { runRun } from "./commands/run.js";
 
 const program = new Command();
 
@@ -23,6 +24,29 @@ program
   .description("Validate all task specs and their variant fixtures")
   .action(() => {
     runValidate();
+  });
+
+program
+  .command("run")
+  .description("Run a single trial of one task variant through the MCP proxy (requires ANTHROPIC_API_KEY)")
+  .requiredOption("--task <name>", "task name (matches tasks/<name>.yaml)")
+  .requiredOption("--variant <id>", "variant id from tasks/<name>.variants.json, e.g. v1")
+  .option("--trial <n>", "trial number recorded with the run", "1")
+  .option("--model <id>", "model to drive the agent under test")
+  .option("--json", "print the full trace record as JSON", false)
+  .action(async (opts) => {
+    try {
+      await runRun({
+        task: opts.task,
+        variant: opts.variant,
+        trial: Number.parseInt(opts.trial, 10),
+        model: opts.model,
+        json: Boolean(opts.json),
+      });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
   });
 
 const variants = program.command("variants").description("Manage variant fixtures");
