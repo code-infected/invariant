@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from "commander";
+import { Command, InvalidArgumentError, Option } from "commander";
 import { runValidate } from "./commands/validate.js";
 import { runInit } from "./commands/init.js";
 import { runVariantsRegen } from "./commands/variants-regen.js";
@@ -26,20 +26,40 @@ program
     runValidate();
   });
 
+function positiveInt(flag: string) {
+  return (value: string): number => {
+    const n = Number(value);
+    if (!Number.isInteger(n) || n < 1) throw new InvalidArgumentError(`${flag} must be a positive integer, got "${value}"`);
+    return n;
+  };
+}
+
 program
   .command("run")
-  .description("Run a single trial of one task variant through the MCP proxy (requires ANTHROPIC_API_KEY)")
-  .requiredOption("--task <name>", "task name (matches tasks/<name>.yaml)")
-  .requiredOption("--variant <id>", "variant id from tasks/<name>.variants.json, e.g. v1")
-  .option("--trial <n>", "trial number recorded with the run", "1")
+  .description(
+    "Run a tier (every variant x trial the task spec asks for) or, with --variant, one debugging trial. " +
+      "Requires ANTHROPIC_API_KEY."
+  )
+  .option("--task <name>", "task name (matches tasks/<name>.yaml); with a tier, omit to run every task")
+  .addOption(
+    new Option("--tier <tier>", "fan out the smoke or full tier (default: execution.default_tier in invariant.config.yaml)").choices([
+      "smoke",
+      "full",
+    ])
+  )
+  .option("--variant <id>", "run exactly one trial of this variant (e.g. v1), no fan-out, no retries")
+  .option("--trial <n>", "trial number recorded with a --variant run (default 1)", positiveInt("--trial"))
+  .option("--concurrency <n>", "max trials in flight (default: execution.worker_concurrency)", positiveInt("--concurrency"))
   .option("--model <id>", "model to drive the agent under test")
-  .option("--json", "print the full trace record as JSON", false)
+  .option("--json", "print JSON: the full trace record for --variant, the batch summary for a tier", false)
   .action(async (opts) => {
     try {
       await runRun({
         task: opts.task,
         variant: opts.variant,
-        trial: Number.parseInt(opts.trial, 10),
+        tier: opts.tier,
+        trial: opts.trial,
+        concurrency: opts.concurrency,
         model: opts.model,
         json: Boolean(opts.json),
       });

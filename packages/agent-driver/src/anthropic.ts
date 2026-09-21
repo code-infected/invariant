@@ -50,17 +50,46 @@ export interface MessagesResponse {
 /**
  * A provider-side failure: rate limit, overload, timeout, dropped connection. The
  * architecture treats these as infra flakiness, not agent inconsistency, so they are
- * distinguishable from everything else. Retrying them is the worker pool's job in the
- * fan-out milestone; a single trial just reports the classification.
+ * distinguishable from everything else. A single trial only reports the classification;
+ * whether it is retried is decided by the batch runner's retry policy (retry.ts), which
+ * reads the HTTP status off this error.
  */
 export class ProviderInfraError extends Error {
   constructor(
     message: string,
-    readonly status?: number
+    /** HTTP status; undefined for a transport-level failure (no response at all). */
+    readonly status?: number,
+    /** Parsed from the provider's retry-after header, when it sent one. */
+    readonly retryAfterMs?: number
   ) {
     super(message);
     this.name = "ProviderInfraError";
   }
+}
+
+/**
+ * The provider answered, and refused: 400 (malformed request), 401/403 (bad key), 404
+ * (unknown model), and so on. Not transient, so never retried, and not a harness bug
+ * either; kept distinct so a run matrix full of 401s reads as "fix the key", not "flaky".
+ */
+export class ProviderRejectedError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "ProviderRejectedError";
+  }
+}
+
+/** retry-after is either delta-seconds or an HTTP date. Anything else is ignored. */
+export function parseRetryAfter(header: string | null, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const at = Date.parse(header);
+  if (!Number.isNaN(at)) return Math.max(0, at - now);
+  return undefined;
 }
 
 const INFRA_STATUS = new Set([408, 429, 500, 502, 503, 504, 529]);
@@ -116,8 +145,10 @@ export async function callMessages(options: CallMessagesOptions): Promise<Messag
   if (!res.ok) {
     const body = await res.text();
     const message = `Anthropic API request failed (${res.status}): ${body}`;
-    if (INFRA_STATUS.has(res.status)) throw new ProviderInfraError(message, res.status);
-    throw new Error(message);
+    if (INFRA_STATUS.has(res.status)) {
+      throw new ProviderInfraError(message, res.status, parseRetryAfter(res.headers.get("retry-after")));
+    }
+    throw new ProviderRejectedError(message, res.status);
   }
 
   return (await res.json()) as MessagesResponse;

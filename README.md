@@ -26,9 +26,25 @@ Working:
 - A single-trial runner: one task, one variant, one trial, driven through the proxy,
   producing a complete trace record (run metadata plus the ordered tool-call sequence)
   in a local trace store.
+- Fan-out: `invariant run --tier=smoke|full` runs every (variant x trial) cell the task
+  spec's tier asks for, through a bounded worker pool, as one batch in the trace store.
+  Provider infra failures (the statuses in `invariant.config.yaml`'s
+  `providers.retry.retry_on`) are retried with backoff and never counted as a result;
+  anything the agent actually did, including hitting its wall clock, counts on the first
+  attempt.
 
-Not built yet: fan-out over trials and variants, the three scoring axes, the gate/CI
-integration, the dashboard, deployment fingerprinting, OTel export, adversarial mode.
+Verified so far with a scripted stand-in for the model (see `TrialDeps.callModel`), plus
+real-API runs with an invalid key to exercise the HTTP error path. No trial has run
+against a real model yet.
+
+Two known gaps before the full tier covers all three example tasks: the only tool server
+in the repo is the refund one, so `run` refuses the code-agent and research tasks (it
+checks that the tool server serves every tool a task declares, rather than handing the
+agent the wrong tools); and every fixture has 5 variants while the full tiers ask for 6-8,
+so those tiers run all 5 and say so rather than repeating phrasings.
+
+Not built yet: the three scoring axes, the gate/CI integration, the dashboard, deployment
+fingerprinting, OTel export, adversarial mode.
 
 ## Layout
 
@@ -37,7 +53,7 @@ tasks/                      task specs (*.yaml) and their variant fixtures (*.va
 packages/cli/               the invariant CLI
 packages/mcp-proxy/         transparent recording MCP proxy (the instrumentation layer)
 packages/toy-tool-server/   a deterministic MCP tool server to test the proxy against
-packages/agent-driver/      drives one trial: model tool-use loop, tools supplied by the proxy
+packages/agent-driver/      drives trials: model tool-use loop via the proxy, fan-out, retry policy
 packages/trace-store/       run/tool-call metadata + raw trace blobs (SQLite locally)
 ```
 
@@ -46,18 +62,35 @@ packages/trace-store/       run/tool-call metadata + raw trace blobs (SQLite loc
 ```
 npm install
 npm run build                    # the packages import each other's build output
-npm test                         # proxy and driver tests, no API key needed
+npm test                         # all package tests, no API key needed
 npm run validate                 # validate every task spec + fixture
 
 export ANTHROPIC_API_KEY=...     # required: a trial calls a real model
+npm run invariant -- run --task=refund-duplicate-check --tier=smoke
 npm run invariant -- run --task=refund-duplicate-check --variant=v1
 npm run invariant -- variants regen --task=refund-duplicate-check
 ```
 
-`run` executes exactly one trial. It loads the task spec and the named variant, starts
-the proxy (which starts the tool server), gives the agent the proxy's tools, and writes
-the trace to `.invariant/` — `trace.db` for metadata, `traces/<run_id>.json` for the full
-raw trace. Add `--json` to print the whole record.
+`run --tier=smoke|full` fans out. For each task (or just `--task`), it reads the tier's
+`trials_*` and `variants_*` from the spec, takes the first N variants in fixture order
+(never a random sample, so a tier always measures the same phrasings), and runs every
+(variant x trial) cell, at most `execution.worker_concurrency` at a time (`--concurrency`
+overrides). Omitting `--tier` uses `execution.default_tier`. It prints progress to stderr
+and a summary to stdout: runs completed, infra attempts retried, cells whose retries ran
+out, other errors, wall time, and tokens. It exits nonzero only when a cell ended without
+a behavioural answer. Whether the answers agree is for the scoring engine to decide.
+
+Retries are per cell. Every attempt is its own run row with its own tool calls, so the
+evidence of a 429 is kept, but a retried attempt is flagged `superseded`. The run matrix
+for scoring is `runs where batch_id = ? and superseded = 0`, one row per cell
+(`TraceStore.getBatchRuns`). A cell that runs out of retries keeps its last attempt with
+status `infra_error`: in the matrix, but plainly without an answer.
+
+`run --variant=<id>` executes exactly one trial, with no retries, for debugging one case.
+It loads the task spec and the named variant, starts the proxy (which starts the tool
+server), gives the agent the proxy's tools, and writes the trace to `.invariant/`:
+`trace.db` for metadata, `traces/<run_id>.json` for the full raw trace. Add `--json` to
+print the whole record.
 
 ### How the instrumentation works
 

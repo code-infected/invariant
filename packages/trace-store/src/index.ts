@@ -21,11 +21,34 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { SCHEMA_SQL } from "./schema.js";
+import { POST_MIGRATION_SQL, RUNS_MIGRATIONS, SCHEMA_SQL } from "./schema.js";
 
 export { SCHEMA_SQL };
 
 export type RunStatus = "running" | "ok" | "timeout" | "infra_error";
+
+export type Tier = "smoke" | "full";
+
+export interface CreateBatchInput {
+  task_id: string;
+  tier: Tier;
+  trials_per_variant: number;
+  /** What the tier asked for; may exceed variant_labels.length when the fixture is short. */
+  variants_requested: number;
+  /** Fixture labels actually run, in fixture order. */
+  variant_labels: string[];
+}
+
+export interface BatchRow {
+  id: string;
+  task_id: string;
+  tier: Tier;
+  trials_per_variant: number;
+  variants_requested: number;
+  variant_labels: string[];
+  created_at: string;
+  finished_at: string | null;
+}
 
 export interface DangerousToolSpec {
   name: string;
@@ -59,6 +82,10 @@ export interface RecordRunInput {
   trial_number: number;
   deployment_fingerprint?: string | null;
   status?: RunStatus;
+  /** Set for runs that belong to a fan-out batch; null for single-trial debugging runs. */
+  batch_id?: string | null;
+  /** 1 for the first try at a (variant, trial) cell, incremented per infra retry. */
+  attempt?: number;
 }
 
 export interface CompleteRunInput {
@@ -108,7 +135,11 @@ export interface RunRow {
   id: string;
   task_id: string;
   variant_id: string;
+  batch_id: string | null;
   trial_number: number;
+  attempt: number;
+  /** True when an infra retry replaced this attempt; it is evidence, not part of the matrix. */
+  superseded: boolean;
   deployment_fingerprint: string | null;
   status: RunStatus;
   final_output: string | null;
@@ -157,6 +188,12 @@ function fromJson(value: string | null): unknown {
   }
 }
 
+type RawRunRow = Omit<RunRow, "superseded"> & { superseded: number };
+
+function toRunRow(row: RawRunRow): RunRow {
+  return { ...row, superseded: row.superseded === 1 };
+}
+
 export class TraceStore {
   readonly root: string;
   readonly dbPath: string;
@@ -171,7 +208,28 @@ export class TraceStore {
     // concurrently during a trial without blocking each other.
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
+    // better-sqlite3's default busy timeout is 5s. A fan-out has one driver connection
+    // plus one proxy connection per in-flight trial all writing short transactions to
+    // this file, so give contention more headroom than a single trial ever needed.
+    this.db.pragma("busy_timeout = 15000");
     this.db.exec(SCHEMA_SQL);
+    this.migrate();
+  }
+
+  private migrate(): void {
+    // IMMEDIATE takes the write lock before the column check, so two processes opening
+    // an old trace.db at the same moment cannot both decide to add the same column.
+    this.db
+      .transaction(() => {
+        const columns = new Set(
+          (this.db.prepare("pragma table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name)
+        );
+        for (const m of RUNS_MIGRATIONS) {
+          if (!columns.has(m.column)) this.db.exec(m.ddl);
+        }
+        this.db.exec(POST_MIGRATION_SQL);
+      })
+      .immediate();
   }
 
   /** Insert or update a task by its unique name. Returns the task id. */
@@ -259,19 +317,79 @@ export class TraceStore {
     return id;
   }
 
+  /** Open a batch row for one fan-out (one task, one tier). */
+  createBatch(input: CreateBatchInput): string {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `insert into batches (id, task_id, tier, trials_per_variant, variants_requested, variant_labels, created_at)
+         values (@id, @task_id, @tier, @trials_per_variant, @variants_requested, @variant_labels, @created_at)`
+      )
+      .run({
+        id,
+        task_id: input.task_id,
+        tier: input.tier,
+        trials_per_variant: input.trials_per_variant,
+        variants_requested: input.variants_requested,
+        variant_labels: toJson(input.variant_labels),
+        created_at: new Date().toISOString(),
+      });
+    return id;
+  }
+
+  finishBatch(batchId: string): void {
+    const result = this.db
+      .prepare("update batches set finished_at = ? where id = ?")
+      .run(new Date().toISOString(), batchId);
+    if (result.changes === 0) throw new Error(`finishBatch: no batch with id ${batchId}`);
+  }
+
+  getBatch(id: string): BatchRow | null {
+    const row = this.db.prepare("select * from batches where id = ?").get(id) as
+      | (Omit<BatchRow, "variant_labels"> & { variant_labels: string })
+      | undefined;
+    if (!row) return null;
+    return { ...row, variant_labels: fromJson(row.variant_labels) as string[] };
+  }
+
+  /**
+   * The runs of a batch. By default only the matrix itself (one row per cell, superseded
+   * infra attempts excluded); pass includeSuperseded to also get the retried attempts.
+   */
+  getBatchRuns(batchId: string, options: { includeSuperseded?: boolean } = {}): RunRow[] {
+    const sql = options.includeSuperseded
+      ? "select * from runs where batch_id = ? order by trial_number, variant_id, attempt"
+      : "select * from runs where batch_id = ? and superseded = 0 order by trial_number, variant_id";
+    return (this.db.prepare(sql).all(batchId) as RawRunRow[]).map(toRunRow);
+  }
+
+  /** Flag an attempt as replaced by an infra retry. Only a completed infra_error may be. */
+  markSuperseded(runId: string): void {
+    const result = this.db
+      .prepare("update runs set superseded = 1 where id = ? and status = 'infra_error'")
+      .run(runId);
+    if (result.changes === 0) {
+      // Superseding anything else would drop a behavioural answer out of the matrix,
+      // which is precisely the thing the retry policy must never do.
+      throw new Error(`markSuperseded: run ${runId} does not exist or is not an infra_error`);
+    }
+  }
+
   /** Open a run row. Defaults to status 'running'; call completeRun when the trial ends. */
   recordRun(input: RecordRunInput): string {
     const id = randomUUID();
     this.db
       .prepare(
-        `insert into runs (id, task_id, variant_id, trial_number, deployment_fingerprint, status, created_at)
-         values (@id, @task_id, @variant_id, @trial_number, @deployment_fingerprint, @status, @created_at)`
+        `insert into runs (id, task_id, variant_id, batch_id, trial_number, attempt, deployment_fingerprint, status, created_at)
+         values (@id, @task_id, @variant_id, @batch_id, @trial_number, @attempt, @deployment_fingerprint, @status, @created_at)`
       )
       .run({
         id,
         task_id: input.task_id,
         variant_id: input.variant_id,
+        batch_id: input.batch_id ?? null,
         trial_number: input.trial_number,
+        attempt: input.attempt ?? 1,
         deployment_fingerprint: input.deployment_fingerprint ?? null,
         status: input.status ?? "running",
         created_at: new Date().toISOString(),
@@ -348,8 +466,8 @@ export class TraceStore {
   }
 
   getRun(id: string): RunRow | null {
-    const row = this.db.prepare("select * from runs where id = ?").get(id) as RunRow | undefined;
-    return row ?? null;
+    const row = this.db.prepare("select * from runs where id = ?").get(id) as RawRunRow | undefined;
+    return row ? toRunRow(row) : null;
   }
 
   getToolCalls(runId: string): ToolCallRow[] {

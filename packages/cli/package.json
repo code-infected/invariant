@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/index.ts",
-    "validate": "tsx src/index.ts validate"
+    "validate": "tsx src/index.ts validate",
+    "test": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
     "@invariant/agent-driver": "*",

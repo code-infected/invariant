@@ -19,6 +19,14 @@
  *     foreign key, but the fixture label is the handle humans and reports use, and it
  *     has to survive into the trace record.
  *
+ *   - batches, plus runs.batch_id / runs.attempt / runs.superseded, exist so one fan-out
+ *     (M trials x N variants, TECHNICAL_SPEC.md section 4's batch_id) is addressable as a
+ *     unit, and so an infra-flake retry never silently replaces the evidence of the failed
+ *     attempt. Every attempt is its own run row with its own tool_calls; a retried attempt
+ *     is flagged superseded = 1. The run matrix a scorer should read is therefore exactly
+ *     "runs where batch_id = ? and superseded = 0", one row per (variant, trial) cell.
+ *     Single-trial debugging runs have batch_id null.
+ *
  * The scores and deployment_fingerprints tables from section 7 are intentionally absent:
  * nothing computes scores or fingerprints yet, and creating empty tables ahead of the
  * code that fills them just invites them to drift from whatever that code ends up needing.
@@ -48,11 +56,25 @@ create table if not exists variants (
   unique (task_id, fixture_version, label)
 );
 
+create table if not exists batches (
+  id                 text primary key,
+  task_id            text not null references tasks(id),
+  tier               text not null check (tier in ('smoke','full')),
+  trials_per_variant integer not null,
+  variants_requested integer not null,
+  variant_labels     text not null,
+  created_at         text not null,
+  finished_at        text
+);
+
 create table if not exists runs (
   id                     text primary key,
   task_id                text not null references tasks(id),
   variant_id             text not null references variants(id),
+  batch_id               text references batches(id),
   trial_number           integer not null,
+  attempt                integer not null default 1,
+  superseded             integer not null default 0,
   deployment_fingerprint text,
   status                 text not null check (status in ('running','ok','timeout','infra_error')),
   final_output           text,
@@ -76,4 +98,21 @@ create table if not exists tool_calls (
 
 create index if not exists tool_calls_run_idx on tool_calls (run_id, sequence_index);
 create index if not exists runs_task_idx on runs (task_id, variant_id, trial_number);
+`;
+
+/**
+ * Columns added to runs after the first schema shipped. `create table if not exists`
+ * leaves an existing trace.db untouched, so these are applied with ALTER TABLE when
+ * missing. Each one is nullable or defaulted, so existing rows stay valid: a pre-batch
+ * run reads as batch_id null, attempt 1, not superseded, which is exactly what it was.
+ */
+export const RUNS_MIGRATIONS: Array<{ column: string; ddl: string }> = [
+  { column: "batch_id", ddl: "alter table runs add column batch_id text references batches(id)" },
+  { column: "attempt", ddl: "alter table runs add column attempt integer not null default 1" },
+  { column: "superseded", ddl: "alter table runs add column superseded integer not null default 0" },
+];
+
+/** Indexes over migrated columns; created only after the migrations have run. */
+export const POST_MIGRATION_SQL = `
+create index if not exists runs_batch_idx on runs (batch_id, superseded);
 `;

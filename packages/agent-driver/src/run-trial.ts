@@ -11,6 +11,7 @@ import {
   type MessagesResponse,
   isToolUse,
   ProviderInfraError,
+  ProviderRejectedError,
   requireApiKey,
   textOf,
   type ContentBlock,
@@ -65,6 +66,10 @@ export interface TrialPlan {
   max_turns?: number;
   system_prompt?: string;
   deployment_fingerprint?: string | null;
+  /** The fan-out batch this trial belongs to; omitted for a single debugging trial. */
+  batch_id?: string | null;
+  /** Which try at this (variant, trial) cell this is. Defaults to 1. */
+  attempt?: number;
 }
 
 export interface TrialDeps {
@@ -87,7 +92,21 @@ export interface TrialResult {
   stop_reason: TrialStopReason;
   record: RunRecord;
   raw_trace_ref: string;
-  error?: { kind: "provider" | "harness"; message: string };
+  error?: TrialError;
+}
+
+export interface TrialError {
+  /**
+   * provider: the model API failed in a way classified as infrastructure (ProviderInfraError);
+   *   the only kind the retry policy will consider.
+   * provider_rejected: the API answered with a non-transient error (400/401/403/404).
+   * harness: anything else, i.e. a bug or broken environment on the harness side.
+   */
+  kind: "provider" | "provider_rejected" | "harness";
+  message: string;
+  /** HTTP status of a provider failure; absent for transport-level failures. */
+  http_status?: number;
+  retry_after_ms?: number;
 }
 
 function resultText(result: CallToolResult): string {
@@ -102,9 +121,9 @@ function resultText(result: CallToolResult): string {
  *
  * The agent under test is a plain Anthropic tool-use loop whose entire tool surface comes
  * from the proxy, so every call it makes is recorded and every dangerous call is
- * sandboxed, without the agent knowing the proxy is there. Fan-out over variants and
- * trials, retries, and scoring are all later milestones; this function is deliberately
- * one run deep.
+ * sandboxed, without the agent knowing the proxy is there. This function is deliberately
+ * one attempt deep: fan-out over variants and trials, and retrying infra failures, live in
+ * batch.ts, which calls this once per attempt.
  */
 export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialResult> {
   const callModel = deps.callModel ?? callMessages;
@@ -122,6 +141,8 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
     trial_number: plan.trial_number,
     deployment_fingerprint: plan.deployment_fingerprint ?? null,
     status: "running",
+    batch_id: plan.batch_id ?? null,
+    attempt: plan.attempt ?? 1,
   });
 
   const tmpDir = path.join(store.root, "tmp");
@@ -231,7 +252,8 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const kind = err instanceof ProviderInfraError ? "provider" : "harness";
+    const kind: TrialError["kind"] =
+      err instanceof ProviderInfraError ? "provider" : err instanceof ProviderRejectedError ? "provider_rejected" : "harness";
     if (err instanceof ProviderInfraError && Date.now() >= deadlineMs) {
       // The request was aborted by the task's own max_wall_clock_seconds, not by the
       // provider failing. A timeout is its own outcome category, never an infra flake.
@@ -241,12 +263,19 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
       // status + stop_reason already say exactly what happened.
       log(`run ${runId}: wall clock deadline exceeded (${message})`);
     } else {
-      // Both land on infra_error because those are the statuses the schema allows, but
-      // the kind is kept in the raw trace: a provider 429 is flakiness to retry, a
-      // harness bug is a bug, and conflating them corrupts the flake classification.
+      // All three kinds land on infra_error because that is the status the schema has for
+      // "no behavioural answer", but the kind is kept (raw trace, TrialResult): a provider
+      // 429 is flakiness to retry, a 401 is a config problem, a harness bug is a bug, and
+      // conflating them corrupts the flake classification.
       status = "infra_error";
       stopReason = "error";
       error = { kind, message };
+      if (err instanceof ProviderInfraError) {
+        if (err.status !== undefined) error.http_status = err.status;
+        if (err.retryAfterMs !== undefined) error.retry_after_ms = err.retryAfterMs;
+      } else if (err instanceof ProviderRejectedError) {
+        error.http_status = err.status;
+      }
       log(`run ${runId}: ${kind} error: ${message}`);
     }
   } finally {
@@ -261,6 +290,8 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
     task: plan.task_name,
     variant: { id: plan.variant_id, label: plan.variant_label, text: plan.prompt_text },
     trial_number: plan.trial_number,
+    batch_id: plan.batch_id ?? null,
+    attempt: plan.attempt ?? 1,
     model,
     system_prompt: systemPrompt,
     tool_schemas: toolDefs,

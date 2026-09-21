@@ -73,6 +73,18 @@ export function loadTask(name: string): LoadedTask {
     );
   }
 
+  if (spec && fixture) {
+    for (const tier of ["smoke", "full"] as const) {
+      const wanted = tier === "smoke" ? spec.execution.variants_smoke : spec.execution.variants_full;
+      if (fixture.variants.length < wanted) {
+        errors.push(
+          `warning: execution.variants_${tier} is ${wanted} but the fixture has ${fixture.variants.length} variant(s); ` +
+            `the ${tier} tier will run all ${fixture.variants.length} rather than repeat phrasings to pad the count.`
+        );
+      }
+    }
+  }
+
   return { name, spec: spec as TaskSpec, fixture, errors };
 }
 

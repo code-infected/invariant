@@ -5,7 +5,9 @@ import { TASKS_DIR } from "../lib/paths.js";
 const EXAMPLE_CONFIG = `providers:
   retry:
     max_attempts: 3
-    retry_on: [429, 503, "timeout"]
+    # HTTP statuses retried as infra flakes, plus "timeout" for provider failures with no
+    # HTTP response. 529 is Anthropic's "overloaded" status.
+    retry_on: [429, 503, 529, "timeout"]
 execution:
   worker_concurrency: 8
   default_tier: smoke

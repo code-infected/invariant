@@ -16,3 +16,6 @@ export function variantFixturePath(name: string): string {
 
 /** Runtime data (trace db, raw traces, scratch proxy configs). Gitignored, never source. */
 export const INVARIANT_DIR = path.join(REPO_ROOT, ".invariant");
+
+/** Project config (internal-docs/TECHNICAL_SPEC.md section 6). */
+export const CONFIG_PATH = path.join(REPO_ROOT, "invariant.config.yaml");

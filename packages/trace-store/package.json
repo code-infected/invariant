@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test dist"
+    "test": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3"

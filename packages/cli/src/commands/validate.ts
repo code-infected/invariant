@@ -1,4 +1,7 @@
+import fs from "node:fs";
+import { parseConfig } from "../lib/config.js";
 import { loadAllTasks } from "../lib/load-tasks.js";
+import { CONFIG_PATH } from "../lib/paths.js";
 
 export function runValidate(): void {
   const tasks = loadAllTasks();
@@ -22,6 +25,21 @@ export function runValidate(): void {
     }
     for (const e of hard) console.log(`        - ${e}`);
     for (const w of warnings) console.log(`        - ${w}`);
+  }
+
+  // The config is only required by tier runs, so a missing file is a note, not a failure;
+  // a present-but-invalid one is a failure, since `invariant run --tier` would refuse it.
+  if (!fs.existsSync(CONFIG_PATH)) {
+    console.log(`note  invariant.config.yaml not found (needed for tier runs; run: invariant init)`);
+  } else {
+    const config = parseConfig(fs.readFileSync(CONFIG_PATH, "utf8"));
+    if (config.ok) {
+      console.log(`OK    invariant.config.yaml`);
+    } else {
+      console.log(`FAIL  invariant.config.yaml`);
+      for (const e of config.errors) console.log(`        - ${e}`);
+      hardFailures += config.errors.length;
+    }
   }
 
   console.log("");
