@@ -29,7 +29,6 @@ const STATE_TEXT: Record<LeaderRow["state"], string> = {
   unscored: "latest batch not scored yet: run invariant score",
   no_finished_batch: "no finished batch",
   no_batch: "never run in this store",
-  not_runnable: "not runnable",
   spec_error: "task spec does not parse",
 };
 
@@ -37,7 +36,7 @@ export default function Leaderboard() {
   const specs = loadSpecs(tasksDir());
   return withStore(storeRoot(), (state) => {
     if (state.kind !== "ok" && state.kind !== "missing") return <StoreProblem state={state} />;
-    const { rows, served } = buildLeaderboard(state.kind === "ok" ? state.store : null, specs);
+    const { rows } = buildLeaderboard(state.kind === "ok" ? state.store : null, specs);
     return (
       <>
         <div className="page-head">
@@ -105,21 +104,13 @@ export default function Leaderboard() {
                     ) : (
                       <>
                         <td>
-                          <span className={`status ${row.state === "not_runnable" || row.state === "spec_error" ? "s-na" : "s-warn"}`}>
+                          <span className={`status ${row.state === "spec_error" ? "s-na" : "s-warn"}`}>
                             <span className="g">○</span>
-                            {row.state === "not_runnable" ? "NOT RUNNABLE" : row.state === "spec_error" ? "SPEC ERROR" : "NOT MEASURED"}
+                            {row.state === "spec_error" ? "SPEC ERROR" : "NOT MEASURED"}
                           </span>
                         </td>
                         <td colSpan={3} className="small ink2">
                           {STATE_TEXT[row.state]}
-                          {row.state === "not_runnable" && served && (
-                            <>
-                              : the tool server recorded in fingerprint <span className="fp">{short(served.fingerprint)}</span> serves{" "}
-                              <span className="mono">[{served.tools.join(", ")}]</span>, not{" "}
-                              <span className="mono">[{row.missing_tools.join(", ")}]</span>. No consistency has been measured.
-                            </>
-                          )}
-                          {row.state === "no_batch" && !served && " (runnability unknown: no tool list has been recorded in a fingerprint yet)"}
                           {row.note && <div className="muted">{row.note}</div>}
                           {row.unfinished_newer && (
                             <div className="muted">batch {short(row.unfinished_newer.id, 8)} started {fmtTime(row.unfinished_newer.created_at)} has not finished</div>

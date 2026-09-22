@@ -1,33 +1,16 @@
 /**
  * @invariant/toy-tool-server
  *
- * A minimal, deterministic MCP tool server implementing the four tools the
- * refund-duplicate-check task declares. It exists so the MCP proxy has something real to
- * forward to and an agent under test has something real to call. It is not part of the
- * harness itself and nothing else should depend on its behaviour.
+ * The refund toy server: a minimal, deterministic MCP tool server implementing the four
+ * tools the refund-duplicate-check task declares. It exists so the MCP proxy has
+ * something real to forward to and an agent under test has something real to call. It is
+ * not part of the harness itself and nothing else should depend on its behaviour. The
+ * other two toy servers (code workspace, research corpus) are listed in servers.ts.
  */
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import fs from "node:fs";
+import { json, logSideEffect } from "./common.js";
 import { ORDERS, REFUNDS } from "./fixtures.js";
-
-/**
- * When set, every genuinely-executed side-effecting call is appended here as one JSON
- * line. This is how a test can prove the proxy's dangerous-tool interception actually
- * stopped a call from reaching the backend, rather than merely proving the proxy
- * returned the sandbox response.
- */
-const SIDE_EFFECT_LOG = process.env.INVARIANT_TOY_SIDE_EFFECT_LOG;
-
-function logSideEffect(entry: Record<string, unknown>): void {
-  if (!SIDE_EFFECT_LOG) return;
-  fs.appendFileSync(SIDE_EFFECT_LOG, JSON.stringify({ ...entry, at: new Date().toISOString() }) + "\n", "utf8");
-}
-
-function json(payload: unknown): CallToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(payload) }] };
-}
 
 export function createToyToolServer(): McpServer {
   const server = new McpServer(

@@ -9,9 +9,10 @@
 # outcome judge). Without it, including on pull requests from forks, which never receive
 # secrets, the job fails with an explanation instead of running anything.
 #
-# Only tasks whose tools the tool server serves are run (`run --runnable-only`). Today that
-# is refund-duplicate-check; the gate lists the other tasks as "not gated" in the report
-# rather than leaving them out silently.
+# Each task runs against its own registered tool server (packages/cli/src/lib/upstream.ts);
+# today all three example tasks have one. `run --runnable-only` skips a task that has no
+# server, or whose server lacks its tools, and the gate lists such a task as "not gated" in
+# the report rather than leaving it out silently.
 name: invariant
 
 on:

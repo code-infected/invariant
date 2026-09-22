@@ -155,12 +155,11 @@ describe("dashboard data layer", () => {
     withStore(root, (s) => {
       assert.equal(s.kind, "ok");
       if (s.kind !== "ok") return;
-      const { rows, served } = buildLeaderboard(s.store, specs);
-      assert.deepEqual(served?.tools, TOOLS.map((t) => t.name));
+      const { rows } = buildLeaderboard(s.store, specs);
       assert.deepEqual(rows.map((r) => [r.task, r.state]), [
         ["refund-duplicate-check", "scored"],
+        ["code-agent", "no_batch"],
         ["broken", "spec_error"],
-        ["code-agent", "not_runnable"],
       ]);
       const refund = rows[0]!;
       assert.equal(refund.batch!.id, b[2]);
@@ -178,7 +177,6 @@ describe("dashboard data layer", () => {
       assert.deepEqual(refund.deployment!.changed, ["model_version"]);
       assert.equal(refund.synthetic, true);
       assert.ok(refund.worst_margin! < 0);
-      assert.deepEqual(rows[2]!.missing_tools, ["list_files", "delete_file"]);
     });
   });
 

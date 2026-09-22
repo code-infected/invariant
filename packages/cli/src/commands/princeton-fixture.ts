@@ -22,13 +22,11 @@
  * the gate's pass and uncomputed-outcome cases. Same caveat: a script, not a model.
  */
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { runBatch, type BatchSummary, type CallMessagesOptions, type MessagesResponse } from "@invariant/agent-driver";
 import type { TraceStore } from "@invariant/trace-store";
 import type { LoadedTask } from "../lib/load-tasks.js";
+import { requireUpstream } from "../lib/upstream.js";
 import { syncTask } from "./run.js";
-
-const require_ = createRequire(import.meta.url);
 
 export const PRINCETON_TRIALS = 5;
 export const APPROVING_TRIALS = [1, 3, 5];
@@ -151,7 +149,11 @@ export async function writePrincetonBatch(
   return writeScriptedBatch(store, task, princetonScript(), PRINCETON_TRIALS, toyEnv);
 }
 
-/** Like writePrincetonBatch, with any scripted agent: `trials` trials of v1, sequentially. */
+/**
+ * Like writePrincetonBatch, with any scripted agent and any task: `trials` trials of v1,
+ * sequentially, against the task's tool server from the registry (lib/upstream.ts), the
+ * same one `invariant run` would use.
+ */
 export async function writeScriptedBatch(
   store: TraceStore,
   task: LoadedTask,
@@ -171,7 +173,7 @@ export async function writeScriptedBatch(
       trials,
       trial: {
         dangerous_tools: task.spec.tools.dangerous,
-        upstream: { command: process.execPath, args: [require_.resolve("@invariant/toy-tool-server/bin")], env: toyEnv },
+        upstream: { ...requireUpstream(task.spec.name).upstream, env: toyEnv },
         max_wall_clock_seconds: task.spec.execution.max_wall_clock_seconds,
       },
       concurrency: 1,

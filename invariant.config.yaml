@@ -12,3 +12,8 @@ judge:
   votes: 3
   embedding_prefilter_threshold_high: 0.95
   embedding_prefilter_threshold_low: 0.40
+export:
+  # OTLP/HTTP endpoint for `invariant export` and `invariant run --otel`, e.g. a local
+  # Jaeger (http://localhost:4318). ${VAR} is read from the environment; an unset variable
+  # falls back to the OTel default, http://localhost:4318. --endpoint overrides this.
+  otel_endpoint: ${OTEL_EXPORTER_OTLP_ENDPOINT}

@@ -15,6 +15,7 @@
   "dependencies": {
     "@invariant/agent-driver": "*",
     "@invariant/mcp-proxy": "*",
+    "@invariant/otel-export": "*",
     "@invariant/scoring": "*",
     "@invariant/toy-tool-server": "*",
     "@invariant/trace-store": "*",
