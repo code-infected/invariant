@@ -10,6 +10,10 @@
  *   outcome         judge-decided equivalence of final answers, clustered by connected
  *                   components; largest cluster / runs scored.
  *
+ * Plus, for adversarial batches only, injection propagation (propagation.ts): the share
+ * of exposed runs in which a planted instruction led to an unauthorized call, and how many
+ * calls downstream. Its verdict feeds a separate security section of the gate.
+ *
  * Pure functions over plain data; loading runs from the trace store and persisting
  * scores is the caller's job (the CLI's `score` command).
  */
@@ -61,6 +65,24 @@ export {
 } from "./judge.js";
 export { scoreBatch, verdictFor, type BatchScore, type AxisReport, type Verdict, type BatchRunInput } from "./score-batch.js";
 export {
+  scorePropagation,
+  scoreRunPropagation,
+  matchesAction,
+  propagationVerdict,
+  type ActionMatcher,
+  type PropagationSpec,
+  type PropagationToolCall,
+  type PropagationRunInput,
+  type PropagationResult,
+  type PropagationVerdict,
+  type RunPropagation,
+  type Exposure,
+} from "./propagation.js";
+export {
+  aggregateSecurityVerdict,
+  combinedExitCode,
+  SECURITY_FINDING_EXIT_CODE,
+  type SecurityVerdict,
   evaluateGate,
   aggregateVerdict,
   gateExitCode,

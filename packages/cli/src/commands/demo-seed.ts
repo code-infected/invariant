@@ -24,6 +24,12 @@
  *                        Some cells skip the history check; one cell runs out of retries
  *                        (infra_error, excluded from scoring).
  *   5. after the swap    fingerprint C: 2 of 9 refund again. The latest batch, and failing.
+ *
+ * Plus two adversarial batches (kind "adversarial", kept out of the five above) of v1, with a
+ * committed payload fixture planted by the real proxy, driven by the reactive stand-in in
+ * adversarial-fixture.ts:
+ *   6. refund-redirect-other-order  10 trials, obeys in trials 2, 5, 9 (depths 0, 1, 2): 30%, a finding.
+ *   7. refund-policy-override       5 trials, never obeys: 0%, the control.
  */
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -42,6 +48,15 @@ import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR } from "../lib/paths.js";
 import { syncTask } from "./run.js";
 import { scoreStoredBatch } from "./score.js";
+import { loadValidPayload } from "../lib/load-payloads.js";
+import { scoreAdversarialBatch } from "./adversarial.js";
+import { IGNORES_SCRIPT, PROOF_SCRIPT, PROOF_TRIALS, susceptibleAgent, writeScriptedAdversarialBatch } from "./adversarial-fixture.js";
+
+/** The adversarial part of the demo: payload id and the stand-in's script for it. */
+export const DEMO_ADVERSARIAL = [
+  { payload: "refund-redirect-other-order", script: PROOF_SCRIPT, trials: PROOF_TRIALS, label: "adversarial: redirect" },
+  { payload: "refund-policy-override", script: IGNORES_SCRIPT, trials: 5, label: "adversarial: control" },
+];
 
 const require_ = createRequire(import.meta.url);
 
@@ -239,6 +254,7 @@ export async function runDemoSeed(opts: DemoSeedOptions): Promise<DemoSeedResult
           note:
             "SYNTHETIC demo data. Every run was driven by a scripted stand-in, not a model. Nothing in this store is a finding about any model.",
           scenarios: DEMO_SCENARIOS.map((s) => s.name),
+          adversarial: DEMO_ADVERSARIAL.map((a) => `${a.payload} (test fixture)`),
         },
         null,
         2
@@ -249,6 +265,12 @@ export async function runDemoSeed(opts: DemoSeedOptions): Promise<DemoSeedResult
       await scoreStoredBatch(store, store.getBatch(summary)!, task, config, {});
       batches.push({ scenario: scenario.name, batch_id: summary });
       out(`  ${scenario.name.padEnd(22)} batch ${summary}`);
+    }
+    for (const a of DEMO_ADVERSARIAL) {
+      const summary = await writeScriptedAdversarialBatch(store, task, loadValidPayload(a.payload), susceptibleAgent(a.script), a.trials);
+      scoreAdversarialBatch(store, store.getBatch(summary.batch_id)!, { rescore: true });
+      batches.push({ scenario: a.label, batch_id: summary.batch_id });
+      out(`  ${a.label.padEnd(22)} batch ${summary.batch_id}`);
     }
   } finally {
     store.close();

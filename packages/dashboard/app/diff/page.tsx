@@ -51,6 +51,11 @@ function Call({ c }: { c: CallView | null }) {
             ⛨ SANDBOXED
           </span>
         )}
+        {c.is_injected && (
+          <span className="tag tag-injected" title="Adversarial run: the proxy planted a test-fixture payload into this response">
+            ⚑ INJECTED
+          </span>
+        )}
         <span className="muted small num">{fmtTime(c.timestamp).slice(11)}</span>
       </div>
       <div className="small muted">args{c.masked_fields.length ? ` (volatile, masked: ${c.masked_fields.join(", ")})` : ""}</div>

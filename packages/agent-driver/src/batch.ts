@@ -1,4 +1,4 @@
-import type { Tier } from "@invariant/trace-store";
+import type { BatchKind, Tier } from "@invariant/trace-store";
 import { runTrial as realRunTrial, type TrialDeps, type TrialPlan, type TrialResult } from "./run-trial.js";
 import { runWithConcurrency } from "./pool.js";
 import { backoffDelayMs, isRetryableInfraFailure, type RetryPolicy } from "./retry.js";
@@ -32,6 +32,11 @@ export interface BatchPlan {
   trial: TrialTemplate;
   concurrency: number;
   retry: RetryPolicy;
+  /** Defaults to "consistency". "adversarial" batches carry trial.injection. */
+  kind?: BatchKind;
+  /** Adversarial batches: the payload's id and a snapshot of it, stored on the batch. */
+  payload_id?: string;
+  adversarial_payload?: unknown;
 }
 
 export type BatchEvent =
@@ -133,6 +138,19 @@ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
  */
 export async function runBatch(plan: BatchPlan, deps: BatchDeps): Promise<BatchSummary> {
   if (plan.variants.length === 0) throw new Error(`batch for ${plan.task_name} has no variants to run`);
+  // A planted instruction in a consistency batch would silently contaminate its scores, and
+  // an adversarial batch without one would measure nothing: refuse both.
+  const adversarial = (plan.kind ?? "consistency") === "adversarial";
+  if (adversarial !== (plan.trial.injection !== undefined)) {
+    throw new Error(
+      adversarial
+        ? `adversarial batch for ${plan.task_name} has no injection configured`
+        : `consistency batch for ${plan.task_name} must not carry an injection; use kind "adversarial"`
+    );
+  }
+  if (adversarial && plan.payload_id !== plan.trial.injection!.payload_id) {
+    throw new Error(`adversarial batch payload_id (${plan.payload_id}) does not match its injection's (${plan.trial.injection!.payload_id})`);
+  }
   if (!Number.isInteger(plan.trials) || plan.trials < 1) {
     throw new Error(`batch for ${plan.task_name} needs a positive trial count, got ${plan.trials}`);
   }
@@ -152,6 +170,9 @@ export async function runBatch(plan: BatchPlan, deps: BatchDeps): Promise<BatchS
     trials_per_variant: plan.trials,
     variants_requested: plan.variants_requested,
     variant_labels: plan.variants.map((v) => v.variant_label),
+    kind: plan.kind ?? "consistency",
+    payload_id: plan.payload_id ?? null,
+    adversarial_payload: plan.adversarial_payload,
   });
 
   // Trial-major order: every variant gets its trial 1 before any gets trial 2, so the

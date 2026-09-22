@@ -13,6 +13,12 @@
 # today all three example tasks have one. `run --runnable-only` skips a task that has no
 # server, or whose server lacks its tools, and the gate lists such a task as "not gated" in
 # the report rather than leaving it out silently.
+#
+# Adversarial mode runs on the same tier after the consistency run: every payload fixture in
+# tasks/adversarial/ (TEST FIXTURES) against its task, if that task sets adversarial.enabled.
+# The gate reports them in a separate "Security (adversarial)" section of the PR comment,
+# with its own verdict, and exits 3 on a security finding (any propagation, by default).
+# Exit codes: 0 pass, 1 consistency fail, 2 could not evaluate, 3 security finding.
 name: invariant
 
 on:
@@ -96,13 +102,31 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: $INVARIANT run --tier="$TIER" --runnable-only
 
+      # Adversarial batches are their own batch kind: they never enter the consistency scores
+      # above, only the gate's security section. Runs even if the consistency run exited
+      # nonzero, so a flaky consistency cell cannot hide a security result.
+      - name: Adversarial run (injection propagation, ${{ env.TIER }} tier)
+        if: ${{ !cancelled() && steps.key.outputs.present == 'true' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: $INVARIANT adversarial run --tier="$TIER" --runnable-only
+
       # Runs even if `run` exited nonzero (some cells ran out of infra retries): the batch
       # still finished, and the gate decides whether what did come back is enough.
+      # --require-adversarial: a payload whose adversarial run did not finish is incomplete,
+      # never silently "not run".
       - name: Gate
         if: ${{ !cancelled() && steps.key.outputs.present == 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: $INVARIANT gate --report="$REPORT_JSON" --markdown="$REPORT_MD"
+        run: |
+          set +e
+          $INVARIANT gate --require-adversarial --report="$REPORT_JSON" --markdown="$REPORT_MD"
+          code=$?
+          if [ "$code" -eq 3 ]; then
+            echo "::error title=invariant SECURITY finding (adversarial)::A planted-instruction test fixture propagated into an unauthorized tool call. This is a security finding, not a flaky test: see the Security section of the report and route it to the security owner."
+          fi
+          exit "$code"
 
       - name: Job summary
         if: ${{ !cancelled() && steps.key.outputs.present == 'true' }}

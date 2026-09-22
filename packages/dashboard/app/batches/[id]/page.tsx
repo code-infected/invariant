@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { getBatchDetail, memberSummary, type MatrixCell } from "../../../lib/batch";
 import { storeRoot, tasksDir } from "../../../lib/env";
 import { loadSpecs } from "../../../lib/specs";
@@ -66,6 +66,8 @@ export default async function BatchPage({ params }: { params: Promise<{ id: stri
   const specs = loadSpecs(tasksDir());
   return withStore(storeRoot(), (state) => {
     if (state.kind !== "ok") return <StoreProblem state={state} />;
+    // Adversarial batches have their own view; they are never shown as a consistency matrix.
+    if (state.store.getBatch(id)?.kind === "adversarial") redirect(`/adversarial/${id}`);
     const d = getBatchDetail(state.store, id, specs);
     if (!d) notFound();
     const runIds = d.cells.flat().filter((c) => c.run).map((c) => c.run!);

@@ -44,6 +44,13 @@
  *     holds the hash; it carries no foreign key because SQLite cannot add one to an
  *     existing column, and runs created before fingerprinting keep null (unknown), which
  *     is the truth about them. See src/fingerprint.ts for how the hash is computed.
+ *
+ *   - adversarial mode (ARCHITECTURE.md section 4, "injection propagation"): batches.kind
+ *     separates an adversarial batch from a consistency batch, so the two never mix in a
+ *     leaderboard, a trend or a gate. batches.payload_id and batches.adversarial_payload
+ *     (JSON snapshot of the payload fixture as it was run) say what was planted.
+ *     tool_calls.is_injected / injection_payload_id mark the one call whose response the
+ *     proxy modified, so a trace shows exactly where the planted text entered.
  */
 export const SCHEMA_SQL = `
 create table if not exists tasks (
@@ -78,7 +85,10 @@ create table if not exists batches (
   variants_requested integer not null,
   variant_labels     text not null,
   created_at         text not null,
-  finished_at        text
+  finished_at        text,
+  kind               text not null default 'consistency' check (kind in ('consistency','adversarial')),
+  payload_id         text,
+  adversarial_payload text
 );
 
 create table if not exists runs (
@@ -107,6 +117,8 @@ create table if not exists tool_calls (
   response_json  text,
   is_sandboxed   integer not null default 0,
   called_at      text not null,
+  is_injected    integer not null default 0,
+  injection_payload_id text,
   unique (run_id, sequence_index)
 );
 
@@ -151,10 +163,28 @@ export const RUNS_MIGRATIONS: Array<{ column: string; ddl: string }> = [
   { column: "superseded", ddl: "alter table runs add column superseded integer not null default 0" },
 ];
 
+/**
+ * Adversarial-mode columns, added the same way for stores created before adversarial
+ * mode. Defaults describe old rows truthfully: every earlier batch was a consistency
+ * batch, and no earlier tool call was injected.
+ */
+export const TABLE_MIGRATIONS: Array<{ table: string; column: string; ddl: string }> = [
+  {
+    table: "batches",
+    column: "kind",
+    ddl: "alter table batches add column kind text not null default 'consistency' check (kind in ('consistency','adversarial'))",
+  },
+  { table: "batches", column: "payload_id", ddl: "alter table batches add column payload_id text" },
+  { table: "batches", column: "adversarial_payload", ddl: "alter table batches add column adversarial_payload text" },
+  { table: "tool_calls", column: "is_injected", ddl: "alter table tool_calls add column is_injected integer not null default 0" },
+  { table: "tool_calls", column: "injection_payload_id", ddl: "alter table tool_calls add column injection_payload_id text" },
+];
+
 /** Indexes over migrated columns; created only after the migrations have run. */
 export const POST_MIGRATION_SQL = `
 create index if not exists runs_batch_idx on runs (batch_id, superseded);
 create index if not exists runs_fingerprint_idx on runs (deployment_fingerprint);
+create index if not exists batches_kind_idx on batches (task_id, kind, created_at);
 `;
 
 /** Every table a current trace.db has; a read-only open checks for them instead of migrating. */

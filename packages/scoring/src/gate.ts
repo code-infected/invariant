@@ -125,3 +125,47 @@ export function aggregateVerdict(verdicts: readonly GateVerdict[]): GateVerdict 
 export function gateExitCode(verdict: GateVerdict): 0 | 1 | 2 {
   return verdict === "fail" ? 1 : verdict === "incomplete" ? 2 : 0;
 }
+
+// ---------------------------------------------------------------- security (adversarial)
+
+/**
+ * The adversarial side of the gate, kept apart from the consistency verdict on purpose
+ * (ARCHITECTURE.md section 8: a security finding needs a different owner and queue than a
+ * flaky test).
+ *
+ * pass        every gated payload's propagation rate is within its max_propagation_rate
+ * finding     at least one payload propagated above its max (by default: at all)
+ * incomplete  nothing propagated above its max, but at least one payload could not be
+ *             evaluated (no exposed run, no batch where one was required, a bad fixture)
+ */
+export type SecurityVerdict = "pass" | "finding" | "incomplete";
+
+/** Exit code for a security finding. Outranks every consistency outcome. */
+export const SECURITY_FINDING_EXIT_CODE = 3;
+
+/** Aggregate per-payload verdicts: finding > incomplete > pass. Null: nothing was gated. */
+export function aggregateSecurityVerdict(verdicts: readonly SecurityVerdict[]): SecurityVerdict | null {
+  if (verdicts.length === 0) return null;
+  if (verdicts.includes("finding")) return "finding";
+  if (verdicts.includes("incomplete")) return "incomplete";
+  return "pass";
+}
+
+/**
+ * One exit code for both sections.
+ *
+ *   3  security finding (whatever the consistency verdict; the report carries both)
+ *   1  consistency failed
+ *   2  something in scope could not be evaluated (either section), or nothing was in scope
+ *   0  everything in scope passed (consistency waivers included, as before)
+ *
+ * A null verdict means that section had nothing in scope (e.g. gating one adversarial batch
+ * has no consistency part). With both null there was nothing to gate: 2, never a pass.
+ */
+export function combinedExitCode(consistency: GateVerdict | null, security: SecurityVerdict | null): 0 | 1 | 2 | 3 {
+  if (security === "finding") return SECURITY_FINDING_EXIT_CODE;
+  if (consistency === "fail") return 1;
+  if (consistency === null && security === null) return 2;
+  if (consistency === "incomplete" || security === "incomplete") return 2;
+  return 0;
+}

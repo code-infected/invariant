@@ -7,6 +7,8 @@ import { getTrend, type Trend, type TrendPoint } from "../../../lib/trend";
 import { StoreProblem } from "../../../components/store-problem";
 import { Deployment, fmtScore, fmtTime, FpChip, short, SyntheticTag, VerdictBadge } from "../../../components/ui";
 import { isScriptedStandIn } from "@invariant/trace-store";
+import { buildSecurityBoard } from "../../../lib/adversarial";
+import { SecurityTable } from "../../../components/security";
 
 export const dynamic = "force-dynamic";
 
@@ -208,6 +210,17 @@ export default async function TaskTrendPage({ params }: { params: Promise<{ name
             </table>
           </div>
         </div>
+
+        {(() => {
+          const security = buildSecurityBoard(state.store, tasksDir(), trend.task.name);
+          if (security.length === 0) return null;
+          return (
+            <div className="section">
+              <h2>Security: adversarial payloads (separate from the consistency trend above)</h2>
+              <SecurityTable rows={security} showTask={false} />
+            </div>
+          );
+        })()}
 
         <div className="section">
           <h2>Fingerprints seen, in order</h2>
