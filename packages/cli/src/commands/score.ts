@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { openTraceStore, type BatchRow, type TraceStore } from "@invariant/trace-store";
 import {
@@ -73,7 +74,7 @@ export function scoringTask(task: LoadedTask): ScoringTask {
  * ran; if the parts that change what gets scored differ, say so rather than silently
  * scoring an old batch against new rules.
  */
-function specDrift(store: TraceStore, taskId: string, task: LoadedTask): string[] {
+export function specDrift(store: TraceStore, taskId: string, task: LoadedTask): string[] {
   const row = store.getTask(taskId);
   if (!row) return [];
   const changed: string[] = [];
@@ -115,7 +116,7 @@ export function resolveBatch(store: TraceStore, opts: Pick<ScoreOptions, "batch"
   return { batch, task };
 }
 
-function buildJudge(config: InvariantConfig, deps: ScoreDeps): { judge: JudgeFn; settings: JudgeSettings } {
+export function buildJudge(config: InvariantConfig, deps: ScoreDeps): { judge: JudgeFn; settings: JudgeSettings } {
   const settings = {
     model: config.judge.model ?? DEFAULT_JUDGE_MODEL,
     temperature: config.judge.temperature,
@@ -131,6 +132,26 @@ function buildJudge(config: InvariantConfig, deps: ScoreDeps): { judge: JudgeFn;
     judge: createAnthropicJudge({ apiKey, ...settings, retry: config.providers.retry }),
     settings: { ...settings, available: true, injected: false },
   };
+}
+
+/**
+ * A hash of everything besides the run matrix that changes the scores (not the verdicts):
+ * the rubric, dangerous tools and volatile fields from the task spec, and the judge
+ * settings. Thresholds are left out on purpose; they only change verdicts, and the gate
+ * re-applies the current thresholds to a stored score. Stored with every score so the
+ * gate can reuse a score only when it would compute the same numbers again.
+ */
+export function scoringKey(task: LoadedTask, judge: JudgeSettings, config: InvariantConfig, deps: Pick<ScoreDeps, "embed">): string {
+  const inputs = {
+    success_rubric: task.spec.success_rubric,
+    dangerous_tools: task.spec.tools.dangerous.map((d) => d.name),
+    volatile_fields: task.spec.volatile_fields,
+    judge: { model: judge.model, temperature: judge.temperature, votes: judge.votes, injected: judge.injected },
+    prefilter: deps.embed
+      ? { high: config.judge.embedding_prefilter_threshold_high, low: config.judge.embedding_prefilter_threshold_low }
+      : null,
+  };
+  return createHash("sha256").update(canonicalJson(inputs)).digest("hex");
 }
 
 /** Load a batch's matrix from the store, score it, and persist the scores. */
@@ -172,6 +193,7 @@ export async function scoreStoredBatch(
     runs_scored: score.runs_scored,
     details: {
       spec_source: `tasks/${task.spec.name}.yaml`,
+      scoring_key: scoringKey(task, settings, config, deps),
       judge: { model: settings.model, temperature: settings.temperature, votes: settings.votes, injected: settings.injected },
       labels: Object.fromEntries(labels),
       ...score,
@@ -204,7 +226,7 @@ export async function runScore(opts: ScoreOptions, deps: ScoreDeps = {}): Promis
 
   // Nonzero only when scoring itself is incomplete (an axis has no score). A score below
   // its threshold is a finding, not a failure of this command; turning that into an exit
-  // code is the gate's job, which is not built yet.
+  // code is `invariant gate`'s job.
   const s = stored.score;
   if ([s.state_mutation, s.tool_path, s.outcome].some((axis) => axis.score === null)) {
     process.exitCode = 1;
@@ -296,7 +318,9 @@ export function renderReport(stored: StoredScore): string[] {
     for (const n of oc.notes) lines.push(`    note: ${n}`);
   }
   lines.push("");
-  lines.push("  Pass/fail is per axis against tasks/" + s.task + ".yaml thresholds. Informational only: no CI gate yet.");
+  lines.push(
+    "  Pass/fail is per axis against tasks/" + s.task + ".yaml thresholds. Informational: `invariant gate` turns it into an exit code."
+  );
   return lines;
 }
 

@@ -33,9 +33,21 @@ Working:
   anything the agent actually did, including hitting its wall clock, counts on the first
   attempt.
 
+- Scoring: `invariant score --batch=ID | --task=NAME` scores a batch on the three axes
+  independently and saves the scores. The outcome axis needs `ANTHROPIC_API_KEY` for its
+  judge; without it that axis is reported as not computed and the other two still score.
+- A gate: `invariant gate` compares a batch's scores to the task's thresholds and exits
+  0 (pass), 1 (an axis scored below its threshold) or 2 (could not evaluate), with a JSON
+  report and a markdown one for a PR comment. See "Gate and CI" below.
+- A GitHub Actions workflow (`.github/workflows/invariant.yml`): smoke tier on pull
+  requests, full tier nightly.
+
 Verified so far with a scripted stand-in for the model (see `TrialDeps.callModel`), plus
 real-API runs with an invalid key to exercise the HTTP error path. No trial has run
-against a real model yet.
+against a real model yet, and the workflow has been linted (actionlint + shellcheck) but
+has not run on GitHub yet. The scoring and gate proof points use a synthetic, clearly
+labelled reproduction of the Princeton refund scenario (3 of 5 trials refund), not a
+model result.
 
 Two known gaps before the full tier covers all three example tasks: the only tool server
 in the repo is the refund one, so `run` refuses the code-agent and research tasks (it
@@ -43,8 +55,9 @@ checks that the tool server serves every tool a task declares, rather than handi
 agent the wrong tools); and every fixture has 5 variants while the full tiers ask for 6-8,
 so those tiers run all 5 and say so rather than repeating phrasings.
 
-Not built yet: the three scoring axes, the gate/CI integration, the dashboard, deployment
-fingerprinting, OTel export, adversarial mode.
+Not built yet: the dashboard, deployment fingerprinting, OTel export, adversarial mode,
+and the embedding pre-filter's embedder (every non-identical pair of answers goes to the
+judge).
 
 ## Layout
 
@@ -54,6 +67,7 @@ packages/cli/               the invariant CLI
 packages/mcp-proxy/         transparent recording MCP proxy (the instrumentation layer)
 packages/toy-tool-server/   a deterministic MCP tool server to test the proxy against
 packages/agent-driver/      drives trials: model tool-use loop via the proxy, fan-out, retry policy
+packages/scoring/           the three consistency axes, and the gate's threshold comparison
 packages/trace-store/       run/tool-call metadata + raw trace blobs (SQLite locally)
 ```
 
@@ -69,6 +83,8 @@ export ANTHROPIC_API_KEY=...     # required: a trial calls a real model
 npm run invariant -- run --task=refund-duplicate-check --tier=smoke
 npm run invariant -- run --task=refund-duplicate-check --variant=v1
 npm run invariant -- variants regen --task=refund-duplicate-check
+npm run invariant -- score --task=refund-duplicate-check
+npm run invariant -- gate                    # every task's latest batch; exit 0/1/2
 ```
 
 `run --tier=smoke|full` fans out. For each task (or just `--task`), it reads the tier's
@@ -91,6 +107,43 @@ It loads the task spec and the named variant, starts the proxy (which starts the
 server), gives the agent the proxy's tools, and writes the trace to `.invariant/`:
 `trace.db` for metadata, `traces/<run_id>.json` for the full raw trace. Add `--json` to
 print the whole record.
+
+### Gate and CI
+
+`invariant gate --batch=ID | --task=NAME` gates one batch (for `--task`, that task's
+latest; an unfinished latest batch is refused rather than swapped for an older one). With
+neither, it gates the latest batch of every task under `tasks/`, and tasks whose tools
+the tool server does not serve are listed as "not gated" rather than dropped.
+
+It reuses the batch's stored score when that score was computed from the same scoring
+inputs (rubric, dangerous tools, volatile fields, judge settings) and has every axis;
+otherwise it scores the batch first with the same code as `invariant score`. Thresholds
+always come from `tasks/<name>.yaml` as it is now.
+
+| Exit | Verdict | Meaning |
+|---|---|---|
+| 0 | `pass` | every axis scored and at or above its threshold |
+| 0 | `pass_with_waivers` | nothing failed, but an axis had no score and `--allow-uncomputed` allowed it |
+| 1 | `fail` | at least one scored axis is below its threshold (wins over a missing axis) |
+| 2 | `incomplete` | an axis has no score, a runnable task has no finished batch, bad arguments, ... |
+
+Missing scores fail closed. Without `ANTHROPIC_API_KEY` the outcome judge cannot run, and
+a gate that passed anyway would be claiming a consistency nobody measured. Pass
+`--allow-uncomputed=outcome` to accept that explicitly: the verdict is then
+`pass_with_waivers`, never `pass`, and both reports say which axis went unchecked. Only
+outcome can be waived; the other two axes need no model and are only missing when fewer
+than two runs were scored.
+
+`--json` prints the report (schema `invariant.gate/v1`, documented at the top of
+`packages/cli/src/commands/gate.ts`), `--report=PATH` writes it, and `--markdown=PATH`
+writes the PR-comment rendering. Failing axes carry the scoring evidence: the mutation
+signature groups with the trials in each, the distinct tool paths, the outcome clusters.
+
+The workflow runs `validate`, then `run --tier=... --runnable-only` (smoke on pull
+requests, full nightly and on manual dispatch), then `gate`, uploads the JSON report and
+the trace store as artifacts, and posts one PR comment that later runs edit in place. It
+needs the `ANTHROPIC_API_KEY` repository secret; without it (including every pull request
+from a fork, which never gets secrets) the job fails with a message saying so.
 
 ### How the instrumentation works
 

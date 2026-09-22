@@ -1,0 +1,153 @@
+# Consistency gate: run the agent under test repeatedly and fail the check when any
+# consistency axis drops below its task's threshold (see `invariant gate --help`).
+#
+#   pull_request       smoke tier, and one PR comment with the report, edited in place on reruns
+#   schedule (nightly) full tier
+#   workflow_dispatch  full tier by default, or pick one
+#
+# Needs the ANTHROPIC_API_KEY repository secret (it drives the agent under test and the
+# outcome judge). Without it, including on pull requests from forks, which never receive
+# secrets, the job fails with an explanation instead of running anything.
+#
+# Only tasks whose tools the tool server serves are run (`run --runnable-only`). Today that
+# is refund-duplicate-check; the gate lists the other tasks as "not gated" in the report
+# rather than leaving them out silently.
+name: invariant
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: Tier to run
+        type: choice
+        options: [full, smoke]
+        default: full
+
+permissions:
+  contents: read
+
+concurrency:
+  group: invariant-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: consistency gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      TIER: ${{ github.event_name == 'pull_request' && 'smoke' || inputs.tier || 'full' }}
+      REPORT_JSON: invariant-report.json
+      REPORT_MD: invariant-report.md
+      INVARIANT: node packages/cli/dist/index.js
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Validate task specs and variant fixtures
+        run: $INVARIANT validate
+
+      - name: Check ANTHROPIC_API_KEY
+        id: key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FROM_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          if [ "$FROM_FORK" = "true" ]; then
+            why="This pull request comes from a fork, and GitHub does not pass repository secrets to workflows triggered by fork pull requests."
+          else
+            why="The ANTHROPIC_API_KEY repository secret is not set (Settings > Secrets and variables > Actions)."
+          fi
+          msg="ANTHROPIC_API_KEY is not available, so no trial ran and nothing was gated. $why The gate fails closed rather than passing a check that measured nothing."
+          {
+            echo "<!-- invariant-gate-report -->"
+            echo "## invariant gate: NOT RUN"
+            echo
+            echo "$msg"
+          } > "$REPORT_MD"
+          cat "$REPORT_MD" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=ANTHROPIC_API_KEY missing::$msg"
+          exit 1
+
+      - name: Run the ${{ env.TIER }} tier
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: $INVARIANT run --tier="$TIER" --runnable-only
+
+      # Runs even if `run` exited nonzero (some cells ran out of infra retries): the batch
+      # still finished, and the gate decides whether what did come back is enough.
+      - name: Gate
+        if: ${{ !cancelled() && steps.key.outputs.present == 'true' }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: $INVARIANT gate --report="$REPORT_JSON" --markdown="$REPORT_MD"
+
+      - name: Job summary
+        if: ${{ !cancelled() && steps.key.outputs.present == 'true' }}
+        run: |
+          if [ -f "$REPORT_MD" ]; then cat "$REPORT_MD" >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - name: Upload report and trace store
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: invariant-${{ env.TIER }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            invariant-report.json
+            invariant-report.md
+            .invariant/trace.db*
+            .invariant/traces/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+      # One comment per PR, found by its marker and edited on every rerun. Skipped for fork
+      # PRs, whose token cannot write comments (the check itself still fails, see above).
+      - name: Post or update PR comment
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const marker = "<!-- invariant-gate-report -->";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const file = process.env.REPORT_MD;
+            let body = fs.existsSync(file)
+              ? fs.readFileSync(file, "utf8")
+              : `${marker}\n## invariant gate: NO REPORT\n\nThe gate did not write a report (an earlier step failed, or it crashed before writing one). See the workflow run logs.\n`;
+            if (!body.startsWith(marker)) body = `${marker}\n${body}`;
+            const footer = `\n[Workflow run](${runUrl}): JSON report and trace store are attached as artifacts.\n`;
+            const limit = 65000 - footer.length;
+            if (body.length > limit) body = body.slice(0, limit) + "\n\n... report truncated; the full report is in the artifacts.\n";
+            body += footer;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find((c) => c.user?.type === "Bot" && c.body?.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

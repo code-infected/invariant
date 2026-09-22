@@ -60,3 +60,17 @@ export {
   type JudgeRetryPolicy,
 } from "./judge.js";
 export { scoreBatch, verdictFor, type BatchScore, type AxisReport, type Verdict, type BatchRunInput } from "./score-batch.js";
+export {
+  evaluateGate,
+  aggregateVerdict,
+  gateExitCode,
+  assertWaivable,
+  AXES,
+  AXIS_LABELS,
+  WAIVABLE_AXES,
+  type AxisName,
+  type AxisGate,
+  type AxisGateResult,
+  type GateEvaluation,
+  type GateVerdict,
+} from "./gate.js";

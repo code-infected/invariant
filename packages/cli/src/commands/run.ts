@@ -1,8 +1,6 @@
-import { createRequire } from "node:module";
 import path from "node:path";
 import { openTraceStore, type TraceStore } from "@invariant/trace-store";
 import {
-  listUpstreamTools,
   requireApiKey,
   runBatch,
   runTrial,
@@ -15,25 +13,7 @@ import { loadConfig } from "../lib/config.js";
 import { loadAllTasks, loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { selectTier, type Tier } from "../lib/tier.js";
-
-const require_ = createRequire(import.meta.url);
-
-/**
- * The tool server the proxy forwards to.
- *
- * Hardcoded to the toy server for now, on purpose: this milestone proves the
- * instrumentation path end to end, and the toy server is the only tool server in the
- * repo. Pointing the harness at somebody else's real MCP server is a per-target
- * deployment decision (see the proxy notes in internal-docs/TECHNICAL_SPEC.md section 8),
- * so it belongs in invariant.config.yaml once there is a second target to configure for,
- * not in an invented config key nothing reads yet.
- */
-function defaultUpstream(): UpstreamConfig {
-  return {
-    command: process.execPath,
-    args: [require_.resolve("@invariant/toy-tool-server/bin")],
-  };
-}
+import { defaultUpstream, describeUpstream, toolCoverage } from "../lib/upstream.js";
 
 export interface RunOptions {
   /** Required with --variant; with a tier, omitted means every task under tasks/. */
@@ -47,6 +27,12 @@ export interface RunOptions {
   /** Overrides execution.worker_concurrency. */
   concurrency?: number;
   model?: string;
+  /**
+   * Tier runs only: skip (and name) tasks whose declared tools the upstream does not
+   * serve, instead of refusing the whole run. For CI, where only some example tasks have
+   * a tool server yet. `gate` reports the skipped tasks as not gated.
+   */
+  runnableOnly?: boolean;
   json: boolean;
 }
 
@@ -55,6 +41,7 @@ export async function runRun(opts: RunOptions): Promise<void> {
     if (opts.tier !== undefined) throw new Error("--variant runs one trial and --tier runs a fan-out; pass one, not both.");
     if (opts.concurrency !== undefined) throw new Error("--concurrency only applies to a tier run, not a single --variant trial.");
     if (opts.task === undefined) throw new Error("--variant needs --task.");
+    if (opts.runnableOnly) throw new Error("--runnable-only applies to a tier run, not a single --variant trial.");
     return runSingle(opts.task, opts.variant, opts.trial ?? 1, opts);
   }
   if (opts.trial !== undefined) throw new Error("--trial only applies with --variant; a tier run numbers its own trials.");
@@ -63,31 +50,35 @@ export async function runRun(opts: RunOptions): Promise<void> {
 
 
 /**
- * Refuse to run tasks whose declared tools the upstream does not serve.
- *
- * The agent's tool surface is whatever the upstream serves, not what the task spec says,
- * so without this check a task written for a different tool server would run happily
- * against the wrong tools and fill the trace store with runs that measure nothing. Today
- * there is one upstream (the toy refund server), so this is what stops the two non-refund
- * example tasks from being run against refund tools. Checked once, before any model call.
+ * Refuse to run tasks whose declared tools the upstream does not serve (see toolCoverage).
+ * Today there is one upstream (the toy refund server), so this is what stops the two
+ * non-refund example tasks from being run against refund tools. Checked once, before any
+ * model call. With `skipUnrunnable`, those tasks are dropped with a notice instead, and
+ * only an empty remainder is an error.
  */
-async function preflightTools(tasks: LoadedTask[], upstream: UpstreamConfig): Promise<void> {
-  const served = new Set(await listUpstreamTools(upstream));
-  const problems: string[] = [];
-  for (const task of tasks) {
-    const missing = task.spec.tools.allowed.filter((t) => !served.has(t));
-    if (missing.length > 0) {
-      problems.push(`${task.spec.name}: upstream does not serve [${missing.join(", ")}]`);
+async function preflightTools(
+  tasks: LoadedTask[],
+  upstream: UpstreamConfig,
+  options: { skipUnrunnable?: boolean } = {}
+): Promise<LoadedTask[]> {
+  const { served, missing } = await toolCoverage(tasks, upstream);
+  if (missing.size === 0) return tasks;
+  const problems = [...missing].map(([name, gap]) => `${name}: upstream does not serve [${gap.join(", ")}]`);
+  if (options.skipUnrunnable) {
+    const runnable = tasks.filter((t) => !missing.has(t.spec.name));
+    for (const p of problems) console.error(`skipping ${p} (--runnable-only); it will not be run or gated`);
+    if (runnable.length === 0) {
+      throw new Error(`--runnable-only: no task left to run; the tool server (${describeUpstream(upstream)}) serves [${served.join(", ")}].`);
     }
+    return runnable;
   }
-  if (problems.length > 0) {
-    throw new Error(
-      `refusing to run: the tool server (${[upstream.command, ...upstream.args].join(" ")}) serves ` +
-        `[${[...served].join(", ")}], which does not cover every tool these tasks declare:\n` +
-        problems.map((p) => `  - ${p}`).join("\n") +
-        `\nThe agent would be given the wrong tools and its traces would measure nothing.`
-    );
-  }
+  throw new Error(
+    `refusing to run: the tool server (${describeUpstream(upstream)}) serves ` +
+      `[${served.join(", ")}], which does not cover every tool these tasks declare:\n` +
+      problems.map((p) => `  - ${p}`).join("\n") +
+      `\nThe agent would be given the wrong tools and its traces would measure nothing. ` +
+      `Pass --runnable-only to run the rest and skip these.`
+  );
 }
 
 /** Upsert the task and the given fixture variants; returns the task id and label -> variant id. */
@@ -197,11 +188,11 @@ async function runTier(opts: RunOptions): Promise<void> {
   const concurrency = opts.concurrency ?? config.execution.worker_concurrency;
   const retry = config.providers.retry;
 
-  const tasks = opts.task !== undefined ? [loadValidTask(opts.task)] : loadAllTasks().map((t) => loadValidTask(t.name));
-  if (tasks.length === 0) throw new Error("no task specs under tasks/, nothing to run.");
+  const requested = opts.task !== undefined ? [loadValidTask(opts.task)] : loadAllTasks().map((t) => loadValidTask(t.name));
+  if (requested.length === 0) throw new Error("no task specs under tasks/, nothing to run.");
 
   const upstream = defaultUpstream();
-  await preflightTools(tasks, upstream);
+  const tasks = await preflightTools(requested, upstream, { skipUnrunnable: opts.runnableOnly });
 
   const store = openTraceStore({ root: INVARIANT_DIR });
   const summaries: BatchSummary[] = [];
