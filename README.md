@@ -41,6 +41,11 @@ Working:
   report and a markdown one for a PR comment. See "Gate and CI" below.
 - A GitHub Actions workflow (`.github/workflows/invariant.yml`): smoke tier on pull
   requests, full tier nightly.
+- Deployment fingerprints: every run records a hash of the model asked for, the model the
+  API reported answering, the system prompt, and the exact tool list the proxy exposed.
+  `score` and `gate` warn when a batch spans more than one fingerprint.
+- A local, read-only dashboard (`invariant dashboard`): leaderboard, batch run matrix,
+  trace diff, and a trend view with fingerprint changes marked. See "Dashboard" below.
 
 Verified so far with a scripted stand-in for the model (see `TrialDeps.callModel`), plus
 real-API runs with an invalid key to exercise the HTTP error path. No trial has run
@@ -55,7 +60,10 @@ checks that the tool server serves every tool a task declares, rather than handi
 agent the wrong tools); and every fixture has 5 variants while the full tiers ask for 6-8,
 so those tiers run all 5 and say so rather than repeating phrasings.
 
-Not built yet: the dashboard, deployment fingerprinting, OTel export, adversarial mode,
+The dashboard has only ever displayed SYNTHETIC data (`invariant demo-seed`, scripted
+stand-in); it labels it as such on every page.
+
+Not built yet: OTel export, adversarial mode,
 and the embedding pre-filter's embedder (every non-identical pair of answers goes to the
 judge).
 
@@ -68,7 +76,8 @@ packages/mcp-proxy/         transparent recording MCP proxy (the instrumentation
 packages/toy-tool-server/   a deterministic MCP tool server to test the proxy against
 packages/agent-driver/      drives trials: model tool-use loop via the proxy, fan-out, retry policy
 packages/scoring/           the three consistency axes, and the gate's threshold comparison
-packages/trace-store/       run/tool-call metadata + raw trace blobs (SQLite locally)
+packages/trace-store/       run/tool-call metadata + raw trace blobs (SQLite locally), deployment fingerprints
+packages/dashboard/         read-only Next.js dashboard over the trace store
 ```
 
 ## Running it
@@ -85,6 +94,7 @@ npm run invariant -- run --task=refund-duplicate-check --variant=v1
 npm run invariant -- variants regen --task=refund-duplicate-check
 npm run invariant -- score --task=refund-duplicate-check
 npm run invariant -- gate                    # every task's latest batch; exit 0/1/2
+npm run invariant -- dashboard --port=4400   # read-only dashboard on .invariant/
 ```
 
 `run --tier=smoke|full` fans out. For each task (or just `--task`), it reads the tier's
@@ -144,6 +154,61 @@ requests, full nightly and on manual dispatch), then `gate`, uploads the JSON re
 the trace store as artifacts, and posts one PR comment that later runs edit in place. It
 needs the `ANTHROPIC_API_KEY` repository secret; without it (including every pull request
 from a fork, which never gets secrets) the job fails with a message saying so.
+
+### Deployment fingerprints
+
+A run's fingerprint is recorded on its first model response, the first moment every
+component is known: the model id requested, the model id the API reported (an alias can
+move to a new snapshot with nothing changing on the harness side), the system prompt, and
+the tool list exactly as the proxy exposed it (name, description, input schema). Object
+keys are canonicalised before hashing, so key order never changes the hash; array order,
+including the order of the tool list, is kept, because the model sees it. The components
+are stored with the hash in `deployment_fingerprints`, so a reader can see *what* changed.
+Recipe: `packages/trace-store/src/fingerprint.ts`.
+
+A run that never got a model response (e.g. an infra error on the first call) has no
+fingerprint rather than one with a guessed version. Runs recorded before fingerprinting
+existed keep `null`; an older `trace.db` gains the new table the first time a writing
+command opens it, and nothing is backfilled.
+
+A batch whose runs carry more than one fingerprint (the deployment changed mid-batch) is
+flagged by `invariant score` and `invariant gate` (in the text reports, the JSON report's
+`warnings` and `batch.deployment`, and the PR comment). It is a warning, not a gate
+failure: the scores are still computed, they just partly measure the deploy change.
+
+### Dashboard
+
+```
+npm run build
+npm run invariant -- dashboard [--port=4400] [--store=.invariant]
+```
+
+Next.js (`packages/dashboard`), server-rendered, no client-side state. It opens the trace
+store read-only: it never creates, migrates or writes it, and an older store is reported
+as needing migration rather than upgraded behind your back. Views:
+
+- **Leaderboard**: every task in the store or under `tasks/`, latest finished batch, the
+  three axes against thresholds, the gate verdict (the gate's own rule applied to the
+  latest stored score, no rescoring), runs scored of runs total, and the fingerprint.
+  Most at-risk first. Tasks the recorded tool server cannot run, never-run tasks and
+  unparseable specs are listed as such, not dropped.
+- **Batch detail**: the variant x trial run matrix; each cell shows its status and which
+  mutation-signature / tool-path / outcome group it fell in, from `scores.details`. When
+  the outcome axis was not computed, the third grouping is exact final text and says so.
+- **Trace diff**: two runs' tool calls aligned with the tool-path axis's edit model, first
+  divergence highlighted, volatile fields masked with the raw value one click away,
+  sandboxed calls marked.
+- **Trend**: per task, axis scores across batches as small multiples with thresholds,
+  vertical markers at fingerprint changes naming the component that changed, and a
+  fingerprint comparison page (model, prompt diff, tool schema diff).
+
+Demo data: `npm run invariant -- demo-seed --store=.invariant-demo` writes a SYNTHETIC
+store (five scripted batches of refund-duplicate-check through the real proxy, sandbox
+and scorer, including a system-prompt change and a mid-batch "model" change) and
+`--store=.invariant-demo` on `dashboard` shows it. It refuses the default store and any
+path that already has a `trace.db`, never calls a model or the judge, and the dashboard
+shows a persistent SYNTHETIC banner for it. Takes about two minutes (every trial spawns
+the proxy and the tool server).
 
 ### How the instrumentation works
 

@@ -21,9 +21,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { POST_MIGRATION_SQL, RUNS_MIGRATIONS, SCHEMA_SQL } from "./schema.js";
+import { POST_MIGRATION_SQL, REQUIRED_TABLES, RUNS_MIGRATIONS, SCHEMA_SQL } from "./schema.js";
+import { changedComponents, isScriptedStandIn, type DeploymentFingerprint, type FingerprintComponent } from "./fingerprint.js";
 
 export { SCHEMA_SQL };
+export {
+  computeDeploymentFingerprint,
+  changedComponents,
+  canonicalJson,
+  isScriptedStandIn,
+  SCRIPTED_STAND_IN_MARKER,
+  FINGERPRINT_FORMAT,
+  type DeploymentFingerprint,
+  type FingerprintInput,
+  type FingerprintComponent,
+} from "./fingerprint.js";
 
 export type RunStatus = "running" | "ok" | "timeout" | "infra_error";
 
@@ -198,6 +210,65 @@ export interface RunRecord {
 export interface TraceStoreOptions {
   /** Directory that holds trace.db and traces/. Defaults to <cwd>/.invariant */
   root?: string;
+  /**
+   * Open an existing trace.db without writing anything: no directory creation, no schema
+   * creation, no migration. For readers such as the dashboard. A missing file throws
+   * StoreNotFoundError; a store whose schema predates this code throws
+   * StoreOutdatedError (open it once with a writing command to migrate it).
+   */
+  readonly?: boolean;
+}
+
+export class StoreNotFoundError extends Error {
+  constructor(readonly dbPath: string) {
+    super(`no trace store at ${dbPath}`);
+    this.name = "StoreNotFoundError";
+  }
+}
+
+export class StoreOutdatedError extends Error {
+  constructor(
+    readonly dbPath: string,
+    readonly missing: string[]
+  ) {
+    super(
+      `trace store ${dbPath} predates this version of invariant (missing: ${missing.join(", ")}). ` +
+        `Any writing command (e.g. invariant score) migrates it in place; a read-only open never does.`
+    );
+    this.name = "StoreOutdatedError";
+  }
+}
+
+/** A stored fingerprint row: the computed fingerprint plus when this store first saw it. */
+export interface FingerprintRow extends DeploymentFingerprint {
+  first_seen_at: string;
+}
+
+/** How many of a batch's matrix runs carry each fingerprint; hash null = not recorded. */
+export interface BatchFingerprintCount {
+  hash: string | null;
+  runs: number;
+}
+
+export interface BatchDeploymentFingerprint {
+  hash: string;
+  runs: number;
+  model_name: string | null;
+  model_version: string | null;
+  /** The reported model is the scripted stand-in: SYNTHETIC runs, not a model. */
+  synthetic: boolean;
+}
+
+/** The deployment picture of one batch's run matrix. */
+export interface BatchDeployment {
+  /** Distinct fingerprints across the matrix, most runs first. */
+  fingerprints: BatchDeploymentFingerprint[];
+  /** Matrix runs with no fingerprint: no model response arrived, or the run predates fingerprinting. */
+  runs_without_fingerprint: number;
+  /** More than one distinct fingerprint: the deployment changed during the batch. */
+  mixed: boolean;
+  /** Components that differ between any fingerprint and the most common one. */
+  changed: FingerprintComponent[];
 }
 
 function toJson(value: unknown): string {
@@ -226,10 +297,24 @@ export class TraceStore {
   readonly dbPath: string;
   private readonly db: Database.Database;
 
+  readonly isReadOnly: boolean;
+
   constructor(options: TraceStoreOptions = {}) {
     this.root = path.resolve(options.root ?? path.join(process.cwd(), ".invariant"));
-    fs.mkdirSync(path.join(this.root, "traces"), { recursive: true });
     this.dbPath = path.join(this.root, "trace.db");
+    this.isReadOnly = options.readonly === true;
+    if (this.isReadOnly) {
+      if (!fs.existsSync(this.dbPath)) throw new StoreNotFoundError(this.dbPath);
+      this.db = new Database(this.dbPath, { readonly: true, fileMustExist: true });
+      this.db.pragma("busy_timeout = 15000");
+      const missing = this.missingSchema();
+      if (missing.length > 0) {
+        this.db.close();
+        throw new StoreOutdatedError(this.dbPath, missing);
+      }
+      return;
+    }
+    fs.mkdirSync(path.join(this.root, "traces"), { recursive: true });
     this.db = new Database(this.dbPath);
     // WAL so the proxy process and the driver process can write/read the same file
     // concurrently during a trial without blocking each other.
@@ -241,6 +326,19 @@ export class TraceStore {
     this.db.pragma("busy_timeout = 15000");
     this.db.exec(SCHEMA_SQL);
     this.migrate();
+  }
+
+  /** Tables and migrated columns this code needs that the open file lacks. */
+  private missingSchema(): string[] {
+    const tables = new Set(
+      (this.db.prepare("select name from sqlite_master where type = 'table'").all() as Array<{ name: string }>).map((t) => t.name)
+    );
+    const missing = REQUIRED_TABLES.filter((t) => !tables.has(t));
+    if (tables.has("runs")) {
+      const columns = new Set((this.db.prepare("pragma table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name));
+      for (const m of RUNS_MIGRATIONS) if (!columns.has(m.column)) missing.push(`runs.${m.column}`);
+    }
+    return missing;
   }
 
   private migrate(): void {
@@ -595,6 +693,104 @@ export class TraceStore {
 
   resolveTraceRef(ref: string): string {
     return path.join(this.root, ref);
+  }
+
+  // ------------------------------------------------------------ deployment fingerprints
+
+  /**
+   * Save a fingerprint (content-addressed: a hash already stored is left as it is, keeping
+   * its first_seen_at). Returns the hash.
+   */
+  recordDeploymentFingerprint(fp: DeploymentFingerprint): string {
+    this.db
+      .prepare(
+        `insert into deployment_fingerprints (hash, model_name, model_version, system_prompt_hash, tool_schema_hash,
+           system_prompt, tool_schema_json, first_seen_at)
+         values (@hash, @model_name, @model_version, @system_prompt_hash, @tool_schema_hash,
+           @system_prompt, @tool_schema_json, @first_seen_at)
+         on conflict (hash) do nothing`
+      )
+      .run({ ...fp, first_seen_at: new Date().toISOString() });
+    return fp.hash;
+  }
+
+  /** Point a run at its fingerprint. The fingerprint must already be recorded. */
+  setRunFingerprint(runId: string, hash: string): void {
+    if (!this.getDeploymentFingerprint(hash)) {
+      throw new Error(`setRunFingerprint: fingerprint ${hash} is not recorded; call recordDeploymentFingerprint first`);
+    }
+    const result = this.db.prepare("update runs set deployment_fingerprint = ? where id = ?").run(hash, runId);
+    if (result.changes === 0) throw new Error(`setRunFingerprint: no run with id ${runId}`);
+  }
+
+  getDeploymentFingerprint(hash: string): FingerprintRow | null {
+    return (this.db.prepare("select * from deployment_fingerprints where hash = ?").get(hash) as FingerprintRow | undefined) ?? null;
+  }
+
+  /** Every fingerprint, oldest first. */
+  listDeploymentFingerprints(): FingerprintRow[] {
+    return this.db.prepare("select * from deployment_fingerprints order by first_seen_at, hash").all() as FingerprintRow[];
+  }
+
+  /**
+   * Fingerprints across a batch's run matrix (superseded attempts excluded), most runs
+   * first. More than one non-null hash means the deployment changed mid-batch.
+   */
+  getBatchFingerprints(batchId: string): BatchFingerprintCount[] {
+    return this.db
+      .prepare(
+        // Ties broken by first appearance (rowid: insertion order; created_at is only ms-precise).
+        `select deployment_fingerprint as hash, count(*) as runs, min(rowid) as first
+           from runs where batch_id = ? and superseded = 0
+           group by deployment_fingerprint order by runs desc, first asc`
+      )
+      .all(batchId)
+      .map((r) => ({ hash: (r as BatchFingerprintCount).hash, runs: (r as BatchFingerprintCount).runs }));
+  }
+
+  /** Fingerprints across a batch's matrix, with their models and what differs between them. */
+  getBatchDeployment(batchId: string): BatchDeployment {
+    const fingerprints: BatchDeploymentFingerprint[] = [];
+    const rows: FingerprintRow[] = [];
+    let without = 0;
+    for (const c of this.getBatchFingerprints(batchId)) {
+      if (c.hash === null) {
+        without += c.runs;
+        continue;
+      }
+      const row = this.getDeploymentFingerprint(c.hash);
+      if (row) rows.push(row);
+      fingerprints.push({
+        hash: c.hash,
+        runs: c.runs,
+        model_name: row?.model_name ?? null,
+        model_version: row?.model_version ?? null,
+        synthetic: isScriptedStandIn(row?.model_version),
+      });
+    }
+    const changed = new Set<FingerprintComponent>();
+    for (const other of rows.slice(1)) for (const c of changedComponents(rows[0]!, other)) changed.add(c);
+    const order: FingerprintComponent[] = ["model_name", "model_version", "system_prompt", "tool_schema"];
+    return {
+      fingerprints,
+      runs_without_fingerprint: without,
+      mixed: fingerprints.length > 1,
+      changed: order.filter((c) => changed.has(c)),
+    };
+  }
+
+  // ------------------------------------------------------------ listings (for readers)
+
+  /** Every task in the store, by name. */
+  listTasks(): TaskRow[] {
+    const ids = this.db.prepare("select id from tasks order by name").all() as Array<{ id: string }>;
+    return ids.map((r) => this.getTask(r.id)!);
+  }
+
+  /** A task's batches, oldest first (the order a trend reads in). */
+  listBatches(taskId: string): BatchRow[] {
+    const ids = this.db.prepare("select id from batches where task_id = ? order by created_at, rowid").all(taskId) as Array<{ id: string }>;
+    return ids.map((r) => this.getBatch(r.id)!);
   }
 
   close(): void {

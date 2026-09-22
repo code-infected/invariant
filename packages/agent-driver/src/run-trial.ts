@@ -4,7 +4,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { proxyBinPath, type DangerousTool, type ProxyConfig, type UpstreamConfig } from "@invariant/mcp-proxy";
-import type { RunRecord, RunStatus, TraceStore } from "@invariant/trace-store";
+import { computeDeploymentFingerprint, type RunRecord, type RunStatus, type TraceStore } from "@invariant/trace-store";
 import {
   callMessages,
   type CallMessagesOptions,
@@ -65,7 +65,6 @@ export interface TrialPlan {
   model?: string;
   max_turns?: number;
   system_prompt?: string;
-  deployment_fingerprint?: string | null;
   /** The fan-out batch this trial belongs to; omitted for a single debugging trial. */
   batch_id?: string | null;
   /** Which try at this (variant, trial) cell this is. Defaults to 1. */
@@ -92,6 +91,12 @@ export interface TrialResult {
   stop_reason: TrialStopReason;
   record: RunRecord;
   raw_trace_ref: string;
+  /**
+   * The run's deployment fingerprint hash, or null when no model response arrived (the
+   * model version is only known once the API answers, and a fingerprint with a guessed
+   * version would be worse than none).
+   */
+  deployment_fingerprint: string | null;
   error?: TrialError;
 }
 
@@ -139,7 +144,8 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
     task_id: plan.task_id,
     variant_id: plan.variant_id,
     trial_number: plan.trial_number,
-    deployment_fingerprint: plan.deployment_fingerprint ?? null,
+    // Set after the first model response, when the model version is known (see below).
+    deployment_fingerprint: null,
     status: "running",
     batch_id: plan.batch_id ?? null,
     attempt: plan.attempt ?? 1,
@@ -169,6 +175,8 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
   let inputTokens = 0;
   let outputTokens = 0;
   let toolDefs: ToolDefinition[] = [];
+  let fingerprint: string | null = null;
+  const modelVersionsSeen: string[] = [];
 
   try {
     await client.connect(
@@ -203,6 +211,26 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
         tools: toolDefs,
         signal: AbortSignal.timeout(remainingMs),
       });
+      // Deployment fingerprint: model asked for, model the API says answered, system prompt,
+      // and the exact tool list the proxy exposed. Recorded on the first response, the
+      // first moment every component is known. Should the reported model change within
+      // one run, the run keeps its first fingerprint and the raw trace lists every
+      // version seen (model_versions_seen).
+      const reported = typeof response.model === "string" && response.model !== "" ? response.model : "(not reported by the API)";
+      if (!modelVersionsSeen.includes(reported)) modelVersionsSeen.push(reported);
+      if (fingerprint === null) {
+        const fp = computeDeploymentFingerprint({
+          model_name: model,
+          model_version: reported,
+          system_prompt: systemPrompt,
+          tool_schema: toolDefs,
+        });
+        store.recordDeploymentFingerprint(fp);
+        store.setRunFingerprint(runId, fp.hash);
+        fingerprint = fp.hash;
+      } else if (modelVersionsSeen.length > 1 && reported !== modelVersionsSeen[0]) {
+        log(`run ${runId}: model version changed mid-run (${modelVersionsSeen[0]} -> ${reported}); fingerprint keeps the first`);
+      }
       inputTokens += response.usage?.input_tokens ?? 0;
       outputTokens += response.usage?.output_tokens ?? 0;
       messages.push({ role: "assistant", content: response.content });
@@ -293,6 +321,8 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
     batch_id: plan.batch_id ?? null,
     attempt: plan.attempt ?? 1,
     model,
+    model_versions_seen: modelVersionsSeen,
+    deployment_fingerprint: fingerprint,
     system_prompt: systemPrompt,
     tool_schemas: toolDefs,
     upstream: plan.upstream,
@@ -323,5 +353,13 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
   const record = store.getRunRecord(runId);
   if (!record) throw new Error(`trace store lost run ${runId} while it was being written`);
 
-  return { run_id: runId, status, stop_reason: stopReason, record, raw_trace_ref: rawTraceRef, error };
+  return {
+    run_id: runId,
+    status,
+    stop_reason: stopReason,
+    record,
+    raw_trace_ref: rawTraceRef,
+    deployment_fingerprint: fingerprint,
+    error,
+  };
 }

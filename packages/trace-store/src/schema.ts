@@ -35,9 +35,15 @@
  *     (e.g. no judge key for the outcome axis) or had fewer than 2 runs. Scoring a batch
  *     again appends a new row; the newest computed_at is the current one.
  *
- * The deployment_fingerprints table from section 7 is intentionally absent: nothing
- * computes fingerprints yet, and creating an empty table ahead of the code that fills it
- * just invites it to drift from whatever that code ends up needing.
+ *   - deployment_fingerprints follows the section 7 sketch (hash, model_name,
+ *     model_version, system_prompt_hash, tool_schema_hash, first_seen_at) plus the
+ *     components themselves: system_prompt (the text, nullable like its hash) and
+ *     tool_schema_json (the canonical tool list). A hash alone says a deploy changed; the
+ *     components say what changed, which is the question anyone looking at a regression
+ *     asks next. Rows are content-addressed and never updated. runs.deployment_fingerprint
+ *     holds the hash; it carries no foreign key because SQLite cannot add one to an
+ *     existing column, and runs created before fingerprinting keep null (unknown), which
+ *     is the truth about them. See src/fingerprint.ts for how the hash is computed.
  */
 export const SCHEMA_SQL = `
 create table if not exists tasks (
@@ -117,6 +123,17 @@ create table if not exists scores (
   computed_at                text not null
 );
 
+create table if not exists deployment_fingerprints (
+  hash               text primary key,
+  model_name         text not null,
+  model_version      text not null,
+  system_prompt_hash text,
+  tool_schema_hash   text not null,
+  system_prompt      text,
+  tool_schema_json   text not null,
+  first_seen_at      text not null
+);
+
 create index if not exists scores_batch_idx on scores (evaluation_batch_id, computed_at);
 create index if not exists tool_calls_run_idx on tool_calls (run_id, sequence_index);
 create index if not exists runs_task_idx on runs (task_id, variant_id, trial_number);
@@ -137,4 +154,8 @@ export const RUNS_MIGRATIONS: Array<{ column: string; ddl: string }> = [
 /** Indexes over migrated columns; created only after the migrations have run. */
 export const POST_MIGRATION_SQL = `
 create index if not exists runs_batch_idx on runs (batch_id, superseded);
+create index if not exists runs_fingerprint_idx on runs (deployment_fingerprint);
 `;
+
+/** Every table a current trace.db has; a read-only open checks for them instead of migrating. */
+export const REQUIRED_TABLES = ["tasks", "variants", "batches", "runs", "tool_calls", "scores", "deployment_fingerprints"];

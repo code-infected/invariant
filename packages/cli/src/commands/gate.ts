@@ -37,7 +37,12 @@
  *       "task": name, "status": "evaluated", "verdict": GateVerdict,
  *       "batch": { "id", "tier", "created_at", "finished_at", "variants": [label],
  *                  "trials_per_variant", "runs_in_batch", "runs_scored",
- *                  "excluded": [{ "run": "v1 trial 2", "run_id", "status" }] },
+ *                  "excluded": [{ "run": "v1 trial 2", "run_id", "status" }],
+ *                  "deployment": { "fingerprints": [{ "hash", "runs", "model_name", "model_version",
+ *                                   "synthetic" }], "runs_without_fingerprint", "mixed",
+ *                                  "changed": ["model_name" | "model_version" | "system_prompt" | "tool_schema"] } },
+ *                  (mixed = the batch spans more than one deployment fingerprint; it is a
+ *                   warning in the top-level "warnings", never a gate failure by itself)
  *       "score": { "id", "source": "stored" | "computed" },
  *       "axes": [{ "axis": "state_mutation" | "tool_path" | "outcome", "score": number | null,
  *                  "threshold", "result": "pass" | "fail" | "not_computed" | "waived",
@@ -79,6 +84,7 @@ import { loadConfig } from "../lib/config.js";
 import { loadAllTasks, loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR } from "../lib/paths.js";
 import { defaultUpstream, describeUpstream, toolCoverage } from "../lib/upstream.js";
+import { batchFingerprints, fingerprintLines, mixedFingerprintWarning, type BatchFingerprintSummary } from "../lib/fingerprints.js";
 import type { InvariantConfig } from "../schema/config.js";
 import {
   buildJudge,
@@ -151,6 +157,7 @@ export interface EvaluatedTaskReport {
     runs_in_batch: number;
     runs_scored: number;
     excluded: Array<{ run: string; run_id: string; status: string }>;
+    deployment: BatchFingerprintSummary;
   };
   score: { id: string; source: "stored" | "computed" };
   axes: AxisGate[];
@@ -293,10 +300,12 @@ async function gateBatch(
     notes.push(...specDrift(store, batch.task_id, task));
   } else {
     const stored = await scoreStoredBatch(store, batch, task, config, deps);
-    notes.push(...stored.warnings);
+    // The mixed-fingerprint warning is reported once, in the top-level warnings.
+    notes.push(...stored.warnings.filter((w) => w !== mixedFingerprintWarning(batch.id, stored.fingerprints)));
     gs = { score: stored.score, score_id: stored.score_id, source: "computed", labels: stored.labels, judge: stored.judge };
   }
 
+  const deployment = batchFingerprints(store, batch.id);
   const evaluation = evaluateGate(gs.score, scoringTask(task).thresholds, { allowUncomputed: opts.allowUncomputed });
   const label = (id: string) => gs!.labels.get(id) ?? id;
   return {
@@ -313,6 +322,7 @@ async function gateBatch(
       runs_in_batch: gs.score.runs_in_batch,
       runs_scored: gs.score.runs_scored,
       excluded: gs.score.excluded.map((e) => ({ run: label(e.run_id), run_id: e.run_id, status: e.status })),
+      deployment,
     },
     score: { id: gs.score_id, source: gs.source },
     axes: evaluation.axes,
@@ -425,6 +435,12 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
     }
   } finally {
     store.close();
+  }
+
+  for (const t of tasks) {
+    if (t.status === "evaluated" && t.batch.deployment.mixed) {
+      warnings.push(`${t.task}: ${mixedFingerprintWarning(t.batch.id, t.batch.deployment)}`);
+    }
   }
 
   const gatedVerdicts = tasks.filter((t) => t.status !== "not_runnable").map((t) => t.verdict as GateVerdict);
@@ -550,6 +566,7 @@ export function renderGateText(r: GateReport): string[] {
     }
     lines.push(`${t.task}  ${VERDICT_TEXT[t.verdict]}`);
     lines.push(`  ${batchLine(t)}`);
+    fingerprintLines(t.batch.deployment).forEach((l, i) => lines.push(`  ${i === 0 ? "deployment   :" : "              "} ${l}`));
     for (const e of t.batch.excluded) lines.push(`  excluded     : ${e.run} (${e.status}), no behavioural answer`);
     lines.push("");
     lines.push("  axis              score   threshold   result");
@@ -646,6 +663,11 @@ export function renderGateMarkdown(r: GateReport): string {
       continue;
     }
     L.push(mdCell(batchLine(t)) + ".");
+    const fp = fingerprintLines(t.batch.deployment);
+    if (fp.length > 0) {
+      L.push("");
+      L.push(`Deployment fingerprint${fp.length > 1 ? "s" : ""}: ${fp.map((l) => mdCell(l)).join("; ")}.`);
+    }
     if (t.batch.excluded.length > 0) {
       L.push("");
       L.push(`Excluded (no behavioural answer): ${t.batch.excluded.map((e) => `${e.run} (${e.status})`).join(", ")}.`);

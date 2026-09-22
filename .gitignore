@@ -8,7 +8,12 @@ dist/
 
 # runtime data: local trace store (sqlite) and raw trace blobs
 .invariant/
+.invariant-*/
 
 # env
 .env
 .env.local
+
+# Next.js build output (packages/dashboard)
+.next/
+next-env.d.ts

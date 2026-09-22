@@ -17,6 +17,7 @@ import {
 import { loadConfig } from "../lib/config.js";
 import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
+import { batchFingerprints, fingerprintLines, mixedFingerprintWarning, type BatchFingerprintSummary } from "../lib/fingerprints.js";
 import type { InvariantConfig } from "../schema/config.js";
 
 export interface ScoreOptions {
@@ -55,6 +56,8 @@ export interface StoredScore {
   score_id: string;
   labels: Map<string, string>;
   judge: JudgeSettings;
+  /** Deployment fingerprints across the batch's run matrix. */
+  fingerprints: BatchFingerprintSummary;
   warnings: string[];
 }
 
@@ -200,7 +203,11 @@ export async function scoreStoredBatch(
     },
   });
 
-  return { batch, score, score_id: scoreId, labels, judge: settings, warnings: specDrift(store, batch.task_id, task) };
+  const fingerprints = batchFingerprints(store, batch.id);
+  const warnings = specDrift(store, batch.task_id, task);
+  const mixed = mixedFingerprintWarning(batch.id, fingerprints);
+  if (mixed) warnings.push(mixed);
+  return { batch, score, score_id: scoreId, labels, judge: settings, fingerprints, warnings };
 }
 
 export async function runScore(opts: ScoreOptions, deps: ScoreDeps = {}): Promise<void> {
@@ -258,6 +265,9 @@ export function renderReport(stored: StoredScore): string[] {
     `  runs         : ${s.runs_scored} scored of ${s.runs_in_batch} in the matrix ` +
       `[${batch.variant_labels.join(", ")}] x ${batch.trials_per_variant} trial(s)`
   );
+  const fpLines = fingerprintLines(stored.fingerprints);
+  fpLines.forEach((l, i) => lines.push(`  ${i === 0 ? "deployment   :" : "              "} ${l}`));
+  if (stored.fingerprints.mixed) lines.push(`                 WARNING: more than one deployment fingerprint in this batch (see warning above)`);
   if (s.excluded.length > 0) {
     lines.push(`  excluded     : ${s.excluded.length} run(s) with no behavioural answer, not counted on any axis`);
     for (const e of s.excluded) lines.push(`                 ${labels.get(e.run_id) ?? e.run_id}: ${e.status}`);
@@ -331,6 +341,7 @@ function scoreJson(stored: StoredScore): unknown {
     tier: stored.batch.tier,
     judge: stored.judge,
     labels: Object.fromEntries(stored.labels),
+    deployment_fingerprints: stored.fingerprints,
     warnings: stored.warnings,
     ...stored.score,
   };

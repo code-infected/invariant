@@ -6,6 +6,8 @@ import { runVariantsRegen } from "./commands/variants-regen.js";
 import { runRun } from "./commands/run.js";
 import { runScore } from "./commands/score.js";
 import { runGate } from "./commands/gate.js";
+import { runDemoSeed } from "./commands/demo-seed.js";
+import { runDashboard } from "./commands/dashboard.js";
 
 const program = new Command();
 
@@ -88,9 +90,10 @@ program
   .option("--batch <id>", "the batch to score (printed by invariant run --tier)")
   .option("--task <name>", "score this task's most recent finished batch")
   .option("--json", "print the full scoring result as JSON", false)
+  .option("--store <path>", "trace store directory holding trace.db (default: .invariant at the repo root)")
   .action(async (opts) => {
     try {
-      await runScore({ batch: opts.batch, task: opts.task, json: Boolean(opts.json) });
+      await runScore({ batch: opts.batch, task: opts.task, json: Boolean(opts.json) }, { storeRoot: opts.store });
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -118,6 +121,7 @@ program
       "The verdict is then pass_with_waivers, not pass, and the report names the waived axis"
   )
   .option("--rescore", "score the batch now even if a reusable stored score exists", false)
+  .option("--store <path>", "trace store directory holding trace.db (default: .invariant at the repo root)")
   .action(async (opts) => {
     try {
       const report = await runGate({
@@ -133,12 +137,46 @@ program
               .filter(Boolean)
           : [],
         rescore: Boolean(opts.rescore),
-      });
+      }, { storeRoot: opts.store });
       process.exitCode = report.exit_code;
     } catch (err) {
       // Bad arguments or an unreadable store: the gate could not evaluate anything.
       console.error((err as Error).message);
       process.exitCode = 2;
+    }
+  });
+
+program
+  .command("dashboard")
+  .description("Start the read-only dashboard (leaderboard, batch detail, trace diff, trend) on a trace store")
+  .option("--port <n>", "port to listen on", positiveInt("--port"), 4400)
+  .option("--store <path>", "trace store directory holding trace.db (default: .invariant at the repo root)")
+  .action(async (opts) => {
+    try {
+      process.exitCode = await runDashboard({ port: opts.port, store: opts.store });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("demo-seed")
+  .description(
+    "Write a SYNTHETIC demo trace store for the dashboard: five scripted batches of refund-duplicate-check " +
+      "(a scripted stand-in, not a model) through the real proxy, sandbox and scorer, including a system-prompt " +
+      "change and a mid-batch 'model' change. Never touches the default store; never calls a model or the judge."
+  )
+  .requiredOption("--store <path>", "directory for the new demo store (must not already hold a trace.db; not .invariant)")
+  .action(async (opts) => {
+    try {
+      console.error("writing SYNTHETIC demo batches (scripted stand-in, not a model)...");
+      const result = await runDemoSeed({ store: opts.store });
+      console.log(`demo store: ${result.store}`);
+      console.log(`view it: invariant dashboard --store=${opts.store}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
     }
   });
 

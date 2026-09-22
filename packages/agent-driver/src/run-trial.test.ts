@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { openTraceStore } from "@invariant/trace-store";
+import { computeDeploymentFingerprint, openTraceStore } from "@invariant/trace-store";
 import { runTrial, type TrialPlan } from "./index.js";
 import type { CallMessagesOptions, MessagesResponse } from "./anthropic.js";
 
@@ -147,6 +147,26 @@ describe("runTrial", () => {
       assert.equal(raw.stop_reason, "reply_to_user");
       assert.ok(Array.isArray(raw.messages));
       assert.ok(fs.existsSync(store.resolveTraceRef(result.raw_trace_ref)));
+      // Deployment fingerprint: requested model, the version the "API" reported, the system
+      // prompt, and the tool list exactly as the proxy exposed it to the model.
+      const fpHash = result.record.run.deployment_fingerprint;
+      assert.ok(fpHash);
+      assert.equal(result.deployment_fingerprint, fpHash);
+      const fp = store.getDeploymentFingerprint(fpHash)!;
+      assert.equal(fp.model_name, "claude-sonnet-4-5");
+      assert.equal(fp.model_version, "scripted-stand-in");
+      assert.equal(fp.system_prompt, model.seen[0]!.system);
+      assert.equal(
+        fp.hash,
+        computeDeploymentFingerprint({
+          model_name: model.seen[0]!.model,
+          model_version: "scripted-stand-in",
+          system_prompt: model.seen[0]!.system,
+          tool_schema: model.seen[0]!.tools,
+        }).hash
+      );
+      assert.equal(raw.deployment_fingerprint, fpHash);
+      assert.deepEqual(raw.model_versions_seen, ["scripted-stand-in"]);
       // Scratch proxy config is cleaned up after the run.
       assert.equal(fs.existsSync(path.join(store.root, "tmp", `proxy-${result.run_id}.json`)), false);
     } finally {
@@ -185,6 +205,9 @@ describe("runTrial", () => {
       assert.equal(result.error?.kind, "provider");
       assert.equal(result.record.run.status, "infra_error");
       assert.ok(result.record.run.trace_blob_ref);
+      // No model ever answered, so the model version is unknown: no fingerprint, not a guess.
+      assert.equal(result.record.run.deployment_fingerprint, null);
+      assert.equal(result.deployment_fingerprint, null);
     } finally {
       store.close();
       fs.rmSync(root, { recursive: true, force: true });

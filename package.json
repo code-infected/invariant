@@ -7,10 +7,11 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build -w @invariant/trace-store && npm run build -w @invariant/toy-tool-server && npm run build -w @invariant/mcp-proxy && npm run build -w @invariant/agent-driver && npm run build -w @invariant/scoring && npm run build -w @invariant/cli",
-    "test": "npm run build && npm test -w @invariant/trace-store && npm test -w @invariant/mcp-proxy && npm test -w @invariant/agent-driver && npm test -w @invariant/scoring && npm test -w @invariant/cli",
+    "build": "npm run build -w @invariant/trace-store && npm run build -w @invariant/toy-tool-server && npm run build -w @invariant/mcp-proxy && npm run build -w @invariant/agent-driver && npm run build -w @invariant/scoring && npm run build -w @invariant/cli && npm run build -w @invariant/dashboard",
+    "test": "npm run build && npm test -w @invariant/trace-store && npm test -w @invariant/mcp-proxy && npm test -w @invariant/agent-driver && npm test -w @invariant/scoring && npm test -w @invariant/cli && npm test -w @invariant/dashboard",
     "validate": "npm run validate -w @invariant/cli",
-    "invariant": "npm run start -w @invariant/cli --"
+    "invariant": "npm run start -w @invariant/cli --",
+    "dashboard": "npm run start -w @invariant/dashboard"
   },
   "license": "UNLICENSED"
 }
