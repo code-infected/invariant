@@ -243,6 +243,18 @@
                 "additionalProperties": false
               },
               "description": "The tools as exposed to the agent, in order"
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The provider the adapter drove the model through, e.g. openai, ollama"
+            },
+            "endpoint": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Host (and port) of the endpoint the requests went to, e.g. api.openai.com, localhost:11434; never a key or a credentialed URL"
             }
           },
           "required": [

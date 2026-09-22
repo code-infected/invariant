@@ -12,13 +12,27 @@ requires-python = ">=3.10"
 dependencies = [
   "langgraph==1.2.12",
   "langchain-core==1.6.4",
-  "langchain-anthropic==1.7.2",
   "jsonschema==4.26.0",
   "PyYAML==6.0.3",
 ]
 
+# Real mode's provider integrations, one extra per LangChain package (--model provider:model).
+# [openai] covers openai, azure, openai-compatible and every OpenAI-compatible preset
+# (openrouter, groq, together, deepseek, mistral, xai, fireworks, ollama, lmstudio, vllm).
+# The default model is Anthropic's, so a bare real-mode run needs [anthropic].
 [project.optional-dependencies]
-dev = ["pytest==9.1.1"]
+anthropic = ["langchain-anthropic==1.7.2"]
+openai = ["langchain-openai==1.6.3"]
+gemini = ["langchain-google-genai==4.4.0"]
+bedrock = ["langchain-aws==1.7.9"]
+all = [
+  "langchain-anthropic==1.7.2",
+  "langchain-openai==1.6.3",
+  "langchain-google-genai==4.4.0",
+  "langchain-aws==1.7.9",
+]
+# The provider tests drive every integration against a local fake server, so dev needs them all.
+dev = ["pytest==9.1.1", "invariant-langgraph[all]"]
 
 [project.scripts]
 invariant-langgraph = "invariant_langgraph.cli:main"

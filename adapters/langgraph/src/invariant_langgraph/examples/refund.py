@@ -12,7 +12,8 @@ is the same termination convention the MCP driver uses.
 Use with the adapter:
     invariant-langgraph run --task refund-duplicate-check --tier smoke \\
         --graph invariant_langgraph.examples.refund:build_graph \\
-        --tools invariant_langgraph.examples.refund:make_tools --out traces/
+        --tools invariant_langgraph.examples.refund:make_tools --out traces/ \\
+        [--model openai:gpt-4.1 | --model ollama:qwen2.5:3b | ...]
 """
 from __future__ import annotations
 

@@ -2,17 +2,38 @@
 from __future__ import annotations
 
 from invariant_langgraph.cli import main
-from invariant_langgraph.driver import MISSING_KEY_MESSAGE, classify_error
+from invariant_langgraph.driver import classify_error
 
 BASE = ["run", "--task", "refund-duplicate-check", "--tier", "smoke", "--graph", "invariant_langgraph.examples.refund:build_graph"]
 
 
-def test_real_mode_without_a_key_refuses_before_running(monkeypatch, tmp_path, repo_root, capsys):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_real_mode_without_a_key_refuses_before_running(clean_env, tmp_path, repo_root, capsys):
+    # No --model: the default is anthropic:claude-sonnet-4-5, which needs ANTHROPIC_API_KEY.
     code = main([*BASE, "--tools", "invariant_langgraph.examples.refund:make_tools", "--out", str(tmp_path / "o"), "--repo-root", str(repo_root)])
     assert code == 1
-    assert MISSING_KEY_MESSAGE in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "ANTHROPIC_API_KEY is not set" in err and "no offline fallback" in err
     assert not (tmp_path / "o").exists()
+
+
+def test_each_provider_names_its_own_key(clean_env, tmp_path, repo_root, capsys):
+    code = main([
+        *BASE, "--tools", "invariant_langgraph.examples.refund:make_tools", "--model", "groq:llama-3.3-70b-versatile",
+        "--out", str(tmp_path / "o"), "--repo-root", str(repo_root),
+    ])
+    assert code == 1
+    assert "GROQ_API_KEY is not set" in capsys.readouterr().err
+    assert not (tmp_path / "o").exists()
+
+
+def test_provider_flags_do_not_apply_to_a_model_factory(tmp_path, repo_root, capsys):
+    code = main([
+        *BASE, "--tools", "invariant_langgraph.examples.refund:make_tools",
+        "--model-factory", "invariant_langgraph.examples.refund_scripted:princeton_model", "--param", "temperature=0",
+        "--out", str(tmp_path / "o"), "--repo-root", str(repo_root),
+    ])
+    assert code == 1
+    assert "apply to --model, not --model-factory" in capsys.readouterr().err
 
 
 def test_tools_that_do_not_cover_the_task_are_refused(tmp_path, repo_root, capsys):
@@ -77,3 +98,20 @@ def only_lookup():
     from invariant_langgraph.examples.refund import make_tools
 
     return make_tools()[:1]
+
+
+def test_the_scripted_path_needs_no_provider_extra(repo_root, tmp_path):
+    """A base install (no extras) runs --model-factory: no provider package is imported."""
+    import subprocess
+    import sys
+
+    code = (
+        "import sys\n"
+        "for m in ('langchain_anthropic', 'langchain_openai', 'langchain_google_genai', 'langchain_aws', 'anthropic', 'openai', 'boto3'):\n"
+        "    sys.modules[m] = None\n"
+        "from invariant_langgraph.cli import main\n"
+        f"sys.exit(main({[*BASE, '--tools', 'invariant_langgraph.examples.refund:make_tools', '--model-factory', 'invariant_langgraph.examples.refund_scripted:princeton_model', '--out', str(tmp_path / 'o'), '--repo-root', str(repo_root)]!r}))\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert len(list((tmp_path / "o").glob("*.json"))) == 4

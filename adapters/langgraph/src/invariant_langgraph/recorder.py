@@ -60,6 +60,38 @@ def _message_text(message: BaseMessage) -> str:
     return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
 
 
+# langchain-aws writes the REQUESTED model id into response_metadata["model_name"]: the
+# Bedrock Converse API does not report which model answered. Treating that as reported
+# would claim a confirmation nobody gave, so for these providers nothing is reported.
+ECHOES_REQUESTED_MODEL = frozenset({"bedrock_converse", "bedrock"})
+
+
+def reported_model(meta: dict[str, Any]) -> str | None:
+    """The model id the provider said answered, from an AI message's response_metadata.
+
+    Where each LangChain integration puts it (pinned versions):
+      langchain-openai        model_name, from the response's `model` (OpenAI, Azure, and
+                              every OpenAI-compatible server); None if the server omits it.
+                              (Its llm_output falls back to the requested id; not read here.)
+      langchain-anthropic     model_name (older versions: model), from the response's `model`
+      langchain-google-genai  model_name, from the response's modelVersion (absent if empty)
+      langchain-aws           nothing reported (see ECHOES_REQUESTED_MODEL)
+    """
+    if meta.get("model_provider") in ECHOES_REQUESTED_MODEL:
+        return None
+    for key in ("model_name", "model", "model_version", "modelId"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+SAMPLING_KEYS = (
+    "temperature", "top_p", "top_k", "max_tokens", "max_output_tokens", "max_completion_tokens",
+    "seed", "frequency_penalty", "presence_penalty", "stop", "reasoning_effort", "thinking",
+)
+
+
 class TraceRecorder(BaseCallbackHandler):
     """Collects tool calls, model identity, system prompt and token usage for one run."""
 
@@ -76,6 +108,8 @@ class TraceRecorder(BaseCallbackHandler):
         self.model_versions: list[str] = []
         #: The system prompt of the first model call that had one.
         self.system_prompt: str | None = None
+        #: Sampling params (SAMPLING_KEYS, non-null) the model object reported for its first call.
+        self.sampling_params: dict[str, Any] | None = None
         self.model_responses = 0
         self.input_tokens = 0
         self.output_tokens = 0
@@ -145,6 +179,8 @@ class TraceRecorder(BaseCallbackHandler):
         with self._lock:
             if isinstance(requested, str) and requested and requested not in self.model_names:
                 self.model_names.append(requested)
+            if self.sampling_params is None:
+                self.sampling_params = _jsonable({k: params[k] for k in SAMPLING_KEYS if params.get(k) is not None})
             if self.system_prompt is None:
                 for message in messages[0] if messages else []:
                     if isinstance(message, SystemMessage):
@@ -160,8 +196,8 @@ class TraceRecorder(BaseCallbackHandler):
                         continue
                     self.model_responses += 1
                     meta = getattr(message, "response_metadata", None) or {}
-                    reported = meta.get("model_name") or meta.get("model")
-                    if isinstance(reported, str) and reported and reported not in self.model_versions:
+                    reported = reported_model(meta)
+                    if reported is not None and reported not in self.model_versions:
                         self.model_versions.append(reported)
                     usage = getattr(message, "usage_metadata", None) or {}
                     self.input_tokens += int(usage.get("input_tokens", 0) or 0)
