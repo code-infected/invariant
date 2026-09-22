@@ -5,9 +5,18 @@
 #   schedule (nightly) full tier
 #   workflow_dispatch  full tier by default, or pick one
 #
-# Needs the ANTHROPIC_API_KEY repository secret (it drives the agent under test and the
-# outcome judge). Without it, including on pull requests from forks, which never receive
-# secrets, the job fails with an explanation instead of running anything.
+# Needs the credentials of the providers that invariant.config.yaml names for models.agent
+# (the agent under test) and models.judge (the outcome judge): e.g. the ANTHROPIC_API_KEY
+# repository secret for the shipped defaults, OPENAI_API_KEY for openai:..., the AWS_*
+# secrets (and the AWS_REGION repository variable) for bedrock:..., nothing for a
+# self-hosted OpenAI-compatible server without a key. The common provider secrets are
+# passed through below; unset ones are empty and ignored. A role that uses api_key_env:
+# NAME needs that secret added to each env block below. `invariant doctor
+# --roles=agent,judge` checks them before anything runs. When one is missing, including
+# on pull requests from forks, which never receive secrets, the job fails with an
+# explanation instead of running anything.
+#
+# Secrets are passed only to the steps that call a model, never to install/build steps.
 #
 # Each task runs against its own registered tool server (packages/cli/src/lib/upstream.ts);
 # today all three example tasks have one. `run --runnable-only` skips a task that has no
@@ -70,13 +79,34 @@ jobs:
       - name: Validate task specs and variant fixtures
         run: $INVARIANT validate
 
-      - name: Check ANTHROPIC_API_KEY
+      - name: Check model credentials (invariant doctor)
         id: key
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
           FROM_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          if [ -n "$ANTHROPIC_API_KEY" ]; then
+          set +e
+          doctor_out=$($INVARIANT doctor --roles=agent,judge 2>&1)
+          code=$?
+          set -e
+          echo "$doctor_out"
+          if [ "$code" -eq 0 ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -84,22 +114,42 @@ jobs:
           if [ "$FROM_FORK" = "true" ]; then
             why="This pull request comes from a fork, and GitHub does not pass repository secrets to workflows triggered by fork pull requests."
           else
-            why="The ANTHROPIC_API_KEY repository secret is not set (Settings > Secrets and variables > Actions)."
+            why="Add the missing repository secret(s) named below (Settings > Secrets and variables > Actions), or point models.agent / models.judge in invariant.config.yaml at a provider whose credentials are set."
           fi
-          msg="ANTHROPIC_API_KEY is not available, so no trial ran and nothing was gated. $why The gate fails closed rather than passing a check that measured nothing."
+          msg="The credentials for the configured agent and judge models are not available, so no trial ran and nothing was gated. $why The gate fails closed rather than passing a check that measured nothing."
           {
             echo "<!-- invariant-gate-report -->"
             echo "## invariant gate: NOT RUN"
             echo
             echo "$msg"
+            echo
+            echo '```'
+            echo "$doctor_out"
+            echo '```'
           } > "$REPORT_MD"
           cat "$REPORT_MD" >> "$GITHUB_STEP_SUMMARY"
-          echo "::error title=ANTHROPIC_API_KEY missing::$msg"
+          echo "::error title=Model credentials missing::$msg"
           exit 1
 
       - name: Run the ${{ env.TIER }} tier
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
         run: $INVARIANT run --tier="$TIER" --runnable-only
 
       # Adversarial batches are their own batch kind: they never enter the consistency scores
@@ -109,6 +159,22 @@ jobs:
         if: ${{ !cancelled() && steps.key.outputs.present == 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
         run: $INVARIANT adversarial run --tier="$TIER" --runnable-only
 
       # Runs even if `run` exited nonzero (some cells ran out of infra retries): the batch
@@ -119,6 +185,22 @@ jobs:
         if: ${{ !cancelled() && steps.key.outputs.present == 'true' }}
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AZURE_OPENAI_API_KEY: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
+          VLLM_API_KEY: ${{ secrets.VLLM_API_KEY }}
         run: |
           set +e
           $INVARIANT gate --require-adversarial --report="$REPORT_JSON" --markdown="$REPORT_MD"

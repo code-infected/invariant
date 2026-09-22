@@ -1,8 +1,11 @@
 export {
   runTrial,
   DEFAULT_SYSTEM_PROMPT,
-  DEFAULT_MODEL,
   DEFAULT_MAX_TURNS,
+  SCRIPTED_MODEL,
+  agentMissingKeyMessage,
+  type ModelCallRequest,
+  type CallModel,
   type TrialPlan,
   type TrialDeps,
   type TrialResult,
@@ -27,11 +30,14 @@ export {
 export { runWithConcurrency } from "./pool.js";
 export { isRetryableInfraFailure, backoffDelayMs, type RetryPolicy } from "./retry.js";
 export { listUpstreamTools } from "./upstream.js";
-export { ProviderInfraError, ProviderRejectedError, requireApiKey, parseRetryAfter } from "./anthropic.js";
-export type {
-  ToolDefinition,
-  Message,
-  ContentBlock,
-  CallMessagesOptions,
-  MessagesResponse,
-} from "./anthropic.js";
+export {
+  ProviderError,
+  isProviderError,
+  scriptedResponse,
+  parseRetryAfter,
+  type ChatMessage,
+  type ChatResponse,
+  type ModelSpec,
+  type ToolCall,
+  type ToolSpec,
+} from "@invariant/providers";

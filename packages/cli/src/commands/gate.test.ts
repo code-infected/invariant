@@ -4,7 +4,7 @@
  * SYNTHETIC: every batch here comes from a scripted stand-in for the model (see
  * princeton-fixture.ts), not a live model. Everything else is real: batch runner, MCP
  * proxy, sandbox, toy tool server, trace store, the committed task specs and their
- * thresholds, the scorer, the stored scores, the gate. ANTHROPIC_API_KEY is removed for
+ * thresholds, the scorer, the stored scores, the gate. every credential the configured model roles read is removed for
  * the whole suite, as it is absent in this environment anyway; the only judge ever used
  * is the rule-based test double, and only where a test says so.
  *
@@ -24,6 +24,8 @@ import { syncTask } from "./run.js";
 import { writeCodeCleanupBatch } from "./code-cleanup-fixture.js";
 import { writeResearchBatch } from "./research-fixture.js";
 import { upstreamForTask } from "../lib/upstream.js";
+import { clearConfiguredCredentials, judgeMissingKeyPattern } from "../lib/models.js";
+import { loadConfig } from "../lib/config.js";
 
 /** Same rule-based stand-in as score.test.ts: "same outcome" iff both or neither say a refund was issued. */
 const refundIssued = (s: string) => /(issued|processed|has been processed)/i.test(s) && !/already/i.test(s);
@@ -40,7 +42,7 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
   let root: string;
   let store: TraceStore;
   let task: LoadedTask;
-  let savedKey: string | undefined;
+  let restoreCredentials: () => void = () => undefined;
   const batches = { identical: "", reworded: "", princeton: "", code: "", research: "" };
 
   async function gate(opts: Partial<GateOptions>, deps: GateDeps = {}) {
@@ -51,8 +53,7 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
   const only = (r: { tasks: unknown[] }) => r.tasks[0] as EvaluatedTaskReport;
 
   before(async () => {
-    savedKey = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    restoreCredentials = clearConfiguredCredentials(loadConfig());
     root = fs.mkdtempSync(path.join(os.tmpdir(), "invariant-gate-test-"));
     store = openTraceStore({ root: path.join(root, ".invariant") });
     task = loadValidTask("refund-duplicate-check");
@@ -65,7 +66,7 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
   });
 
   after(() => {
-    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+    restoreCredentials();
     store?.close();
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
@@ -94,7 +95,7 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
       { tool_name: "process_refund", args: { order_id: "1234", amount: 42, request_id: "<masked>" } },
     ]);
     // The outcome axis is still reported as missing, with the reason, not hidden behind the failure.
-    assert.match(t.axes[2]!.reason!, /ANTHROPIC_API_KEY is not set/);
+    assert.match(t.axes[2]!.reason!, judgeMissingKeyPattern(loadConfig()));
     assert.match(text, /state-mutation\s+0\.600\s+>= 1\.000\s+FAIL/);
     assert.match(text, /invariant gate: FAIL \(exit 1\)/);
     show(lines);

@@ -7,7 +7,10 @@ import Database from "better-sqlite3";
 import {
   canonicalJson,
   changedComponents,
+  compareDeployments,
   computeDeploymentFingerprint,
+  computeDeploymentFingerprintV1,
+  normalizeEndpoint,
   isScriptedStandIn,
   openTraceStore,
   SCHEMA_SQL,
@@ -227,5 +230,123 @@ describe("deployment fingerprints in the store", () => {
     const root = path.join(tmpRoot(), "absent");
     assert.throws(() => openTraceStore({ root, readonly: true }), StoreNotFoundError);
     assert.equal(fs.existsSync(root), false);
+  });
+});
+
+describe("fingerprint formula versions (v1 -> v2: provider and endpoint)", () => {
+  /** BASE hashed by the v1 code as it shipped (commit b3d4a9c); pinned so v1 hashes can never drift. */
+  const V1_BASE_HASH = "ff8d30ae842849146dc9f45840bdbeb8681b8a1c8cf507ecc95980ea562372e6";
+
+  test("the v1 formula is kept exactly; v2 is a different hash for the same components", () => {
+    const v1 = computeDeploymentFingerprintV1(BASE);
+    assert.equal(v1.hash, V1_BASE_HASH);
+    assert.equal(v1.fingerprint_version, 1);
+    const v2 = computeDeploymentFingerprint({ ...BASE, provider: "anthropic", endpoint: "api.anthropic.com" });
+    assert.equal(v2.fingerprint_version, 2);
+    assert.notEqual(v2.hash, v1.hash);
+  });
+
+  test("provider and endpoint are components: a change in either changes the hash and is named", () => {
+    const base = computeDeploymentFingerprint({ ...BASE, provider: "groq", endpoint: "api.groq.com" });
+    const other = computeDeploymentFingerprint({ ...BASE, provider: "together", endpoint: "api.groq.com" });
+    const moved = computeDeploymentFingerprint({ ...BASE, provider: "groq", endpoint: "localhost:8000" });
+    assert.deepEqual(changedComponents(base, other), ["provider"]);
+    assert.deepEqual(changedComponents(base, moved), ["endpoint"]);
+    assert.notEqual(base.hash, other.hash);
+    assert.notEqual(base.hash, moved.hash);
+  });
+
+  test("the endpoint is stored as host[:port] only, never a path or credentials", () => {
+    assert.equal(normalizeEndpoint("https://user:secret@api.example.com:8443/v1?key=abc"), "api.example.com:8443");
+    assert.equal(normalizeEndpoint("localhost:11434"), "localhost:11434");
+    assert.equal(normalizeEndpoint(""), null);
+    const fp = computeDeploymentFingerprint({ ...BASE, provider: "openai", endpoint: "https://k:s@api.openai.com/v1" });
+    assert.equal(fp.endpoint, "api.openai.com");
+  });
+
+  test("v1 vs v2 of the same deployment is a formula change, not a deployment change", () => {
+    const v1 = computeDeploymentFingerprintV1(BASE);
+    const v2 = computeDeploymentFingerprint({ ...BASE, provider: "anthropic", endpoint: "api.anthropic.com" });
+    const same = compareDeployments(v1, v2);
+    assert.deepEqual(same.changed, []);
+    assert.deepEqual(same.unrecorded, ["provider", "endpoint"]);
+    assert.equal(same.formula_changed, true);
+    assert.equal(same.formula_only, true);
+    // A real change across the formula boundary is still a change, and named.
+    const real = compareDeployments(v1, computeDeploymentFingerprint({ ...BASE, model_version: "claude-sonnet-4-5-20260101", provider: "anthropic" }));
+    assert.deepEqual(real.changed, ["model_version"]);
+    assert.equal(real.formula_only, false);
+  });
+
+  test("migration: a v1 store keeps its hashes, gains the columns, and a v1+v2 batch is not 'mixed'", () => {
+    const root = tmpRoot();
+    try {
+      // The deployment_fingerprints table exactly as v1 shipped it, with one v1 row.
+      const db = new Database(path.join(root, "trace.db"));
+      db.exec(preFingerprintSchema());
+      db.exec(`create table deployment_fingerprints (
+        hash text primary key, model_name text not null, model_version text not null, system_prompt_hash text,
+        tool_schema_hash text not null, system_prompt text, tool_schema_json text not null, first_seen_at text not null);`);
+      const v1 = computeDeploymentFingerprintV1(BASE);
+      db.prepare(
+        `insert into deployment_fingerprints values (@hash, @model_name, @model_version, @system_prompt_hash, @tool_schema_hash, @system_prompt, @tool_schema_json, '2026-09-19T00:00:00Z')`
+      ).run(v1);
+      db.exec(`
+        insert into tasks values ('t1','old','p','r','[]','[]','[]','{}',null,'2026-09-19T00:00:00Z');
+        insert into variants values ('v1','t1','v1','x',1,null,null);
+        insert into batches (id, task_id, tier, trials_per_variant, variants_requested, variant_labels, created_at, finished_at)
+          values ('b1','t1','smoke',2,1,'["v1"]','2026-09-19T00:00:00Z','2026-09-19T00:01:00Z');
+        insert into runs (id, task_id, variant_id, batch_id, trial_number, status, created_at, deployment_fingerprint)
+          values ('r1','t1','v1','b1',1,'ok','2026-09-19T00:00:00Z','${v1.hash}');
+      `);
+      db.close();
+
+      assert.throws(() => openTraceStore({ root, readonly: true }), (err: unknown) => {
+        assert.ok(err instanceof StoreOutdatedError);
+        assert.deepEqual(err.missing, ["deployment_fingerprints.fingerprint_version", "deployment_fingerprints.provider", "deployment_fingerprints.endpoint"]);
+        return true;
+      });
+
+      const store = openTraceStore({ root });
+      try {
+        const old = store.getDeploymentFingerprint(v1.hash)!;
+        assert.equal(old.fingerprint_version, 1, "an existing row is a v1 fingerprint");
+        assert.equal(old.provider, null);
+        assert.equal(old.endpoint, null);
+        assert.equal(store.getRun("r1")!.deployment_fingerprint, V1_BASE_HASH, "the stored hash is left as it is");
+
+        // Same deployment, next run, recorded under v2.
+        const v2 = computeDeploymentFingerprint({ ...BASE, provider: "anthropic", endpoint: "api.anthropic.com" });
+        store.recordDeploymentFingerprint(v2);
+        const r2 = store.recordRun({ task_id: "t1", variant_id: "v1", trial_number: 2, batch_id: "b1" });
+        store.setRunFingerprint(r2, v2.hash);
+        const row = store.getDeploymentFingerprint(v2.hash)!;
+        assert.equal(row.fingerprint_version, 2);
+        assert.equal(row.provider, "anthropic");
+        assert.equal(row.endpoint, "api.anthropic.com");
+
+        const d = store.getBatchDeployment("b1");
+        assert.equal(d.fingerprints.length, 2);
+        assert.equal(d.mixed, false, "a formula change is not a mid-batch deployment change");
+        assert.equal(d.formula_only, true);
+        assert.deepEqual(d.formula_versions, [1, 2]);
+        assert.deepEqual(d.changed, []);
+
+        // A v2 fingerprint that really differs makes the batch mixed again.
+        const v2b = computeDeploymentFingerprint({ ...BASE, provider: "openai", endpoint: "api.openai.com", model_name: "gpt-4.1", model_version: "gpt-4.1-2025-04-14" });
+        store.recordDeploymentFingerprint(v2b);
+        const r3 = store.recordRun({ task_id: "t1", variant_id: "v1", trial_number: 3, batch_id: "b1" });
+        store.setRunFingerprint(r3, v2b.hash);
+        const d2 = store.getBatchDeployment("b1");
+        assert.equal(d2.mixed, true);
+        // Against the batch's first (v1) fingerprint, provider/endpoint were never recorded,
+        // so only the model components can be named as changed.
+        assert.deepEqual(d2.changed, ["model_name", "model_version"]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

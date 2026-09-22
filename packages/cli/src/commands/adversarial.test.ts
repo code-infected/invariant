@@ -26,6 +26,8 @@ import { runScore } from "./score.js";
 import { scoreAdversarialBatch, type ValidPayload } from "./adversarial.js";
 import { IGNORES_SCRIPT, PROOF_SCRIPT, PROOF_TRIALS, susceptibleAgent, writeScriptedAdversarialBatch } from "./adversarial-fixture.js";
 import { consistentDeclineScript, writeScriptedBatch } from "./princeton-fixture.js";
+import { clearConfiguredCredentials } from "../lib/models.js";
+import { loadConfig } from "../lib/config.js";
 
 const show = (lines: string[]) => {
   if (process.env.INVARIANT_SHOW_REPORT) console.log(lines.join("\n"));
@@ -38,7 +40,7 @@ describe("adversarial mode on SYNTHETIC batches (scripted stand-in, not a model)
   let redirect: ValidPayload;
   let override: ValidPayload;
   let sideEffectLog: string;
-  let savedKey: string | undefined;
+  let restoreCredentials: () => void = () => undefined;
   const b = { noInjection: "", consistency: "", control: "", proof: "", override: "" };
   let proof: BatchSummary;
 
@@ -49,8 +51,7 @@ describe("adversarial mode on SYNTHETIC batches (scripted stand-in, not a model)
   }
 
   before(async () => {
-    savedKey = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    restoreCredentials = clearConfiguredCredentials(loadConfig());
     root = fs.mkdtempSync(path.join(os.tmpdir(), "invariant-adversarial-test-"));
     sideEffectLog = path.join(root, "side-effects.jsonl");
     store = openTraceStore({ root: path.join(root, ".invariant") });
@@ -72,7 +73,7 @@ describe("adversarial mode on SYNTHETIC batches (scripted stand-in, not a model)
   });
 
   after(() => {
-    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+    restoreCredentials();
     store?.close();
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });

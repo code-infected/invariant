@@ -28,7 +28,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
-import type { BatchSummary, CallMessagesOptions, MessagesResponse } from "@invariant/agent-driver";
+import { scriptedResponse, type BatchSummary, type CallModel, type ModelCallRequest } from "@invariant/agent-driver";
 import type { TraceStore } from "@invariant/trace-store";
 import type { LoadedTask } from "../lib/load-tasks.js";
 import { runAdversarialBatch, type ValidPayload } from "./adversarial.js";
@@ -49,13 +49,10 @@ export interface SusceptibleScript {
 
 const DECLINE = "Order #1234 was already refunded ($42.00 on 2026-09-12), so I haven't issued a second refund.";
 
-function lastToolResultText(options: CallMessagesOptions): string {
+function lastToolResultText(options: ModelCallRequest): string {
   const last = options.messages[options.messages.length - 1];
-  if (!last || typeof last.content === "string") return "";
-  return last.content
-    .filter((b) => b.type === "tool_result")
-    .map((b) => String((b as { content?: unknown }).content ?? ""))
-    .join("\n");
+  if (!last || last.role !== "tool") return "";
+  return last.results.map((r) => r.content).join("\n");
 }
 
 function planAfterHistory(historyText: string, depth: 0 | 1 | 2 | undefined): Step[] {
@@ -79,7 +76,7 @@ function planAfterHistory(historyText: string, depth: 0 | 1 | 2 | undefined): St
  * The stand-in. Trials must run sequentially (concurrency 1): the trial number is recovered
  * by counting first turns, as in princeton-fixture.ts.
  */
-export function susceptibleAgent(script: SusceptibleScript): (options: CallMessagesOptions) => Promise<MessagesResponse> {
+export function susceptibleAgent(script: SusceptibleScript): CallModel {
   let trial = 0;
   let rest: Step[] = [];
   return async (options) => {
@@ -93,13 +90,11 @@ export function susceptibleAgent(script: SusceptibleScript): (options: CallMessa
       step = rest.shift();
     }
     if (!step) throw new Error(`susceptible stand-in: no step ${n} in trial ${trial}`);
-    return {
-      id: `scripted-${trial}-${n}`,
+    return scriptedResponse({
       model: SCRIPTED_MODEL,
-      stop_reason: "tool_use",
-      content: [{ type: "tool_use", id: `tu_${trial}_${n}`, name: step.name, input: step.input }],
+      tool_calls: [{ id: `tu_${trial}_${n}`, name: step.name, input: step.input }],
       usage: { input_tokens: 0, output_tokens: 0 },
-    };
+    });
   };
 }
 
@@ -119,7 +114,7 @@ export async function writeScriptedAdversarialBatch(
   store: TraceStore,
   task: LoadedTask,
   payload: ValidPayload,
-  callModel: (options: CallMessagesOptions) => Promise<MessagesResponse>,
+  callModel: CallModel,
   trials: number,
   toyEnv: Record<string, string> = {}
 ): Promise<BatchSummary> {
@@ -136,7 +131,7 @@ export async function writeScriptedAdversarialBatch(
       concurrency: 1,
       retry: { max_attempts: 1, retry_on: [] },
       upstream: { command: process.execPath, args: [require_.resolve("@invariant/toy-tool-server/bin")], env: toyEnv },
-      model: "scripted-stand-in",
+      // No model: recorded as provider "scripted", model "scripted-stand-in" (see SCRIPTED_MODEL in @invariant/agent-driver).
     },
     { callModel }
   );

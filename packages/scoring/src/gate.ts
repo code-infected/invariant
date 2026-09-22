@@ -16,7 +16,7 @@ export const AXIS_LABELS: Record<AxisName, string> = {
  * Axes whose missing score may be waived with an explicit opt-in.
  *
  * Only outcome: it is the one axis whose computation depends on something outside the
- * batch (the LLM judge, hence ANTHROPIC_API_KEY). State-mutation and tool-path need no
+ * batch (the LLM judge, hence models.judge and its key). State-mutation and tool-path need no
  * model and are only ever missing when fewer than two runs were scored, and a batch like
  * that has measured no consistency at all. Waiving them would let a gate pass on nothing.
  */

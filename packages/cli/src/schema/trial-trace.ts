@@ -105,6 +105,17 @@ export const TrialTraceSchema = z
       .strict(),
     fingerprint: z
       .object({
+        provider: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Provider that served the model, e.g. "openai", "ollama", "anthropic". Omit when unknown; ingest then records it as not recorded'),
+        endpoint: z
+          .string()
+          .min(1)
+          .nullable()
+          .optional()
+          .describe('Host (and port) of the endpoint that answered, e.g. "api.openai.com", "localhost:11434". Host only: never a path or credentials. Null or omitted when unknown'),
         model_name: z.string().min(1).describe("The model id the adapter asked for"),
         model_version: z.string().min(1).describe("The model id the provider reported answering with"),
         system_prompt: z.string().nullable(),

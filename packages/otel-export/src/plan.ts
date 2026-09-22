@@ -93,6 +93,8 @@ function parseThresholds(raw: unknown): Thresholds | null {
 
 /** What run-trial.ts writes to the raw trace blob; every field optional, since blobs can be old or missing. */
 interface RawTrace {
+  /** Written since the agent driver became provider-neutral; absent in older blobs. */
+  provider?: string;
   model?: string;
   model_versions_seen?: string[];
   stop_reason?: string | null;
@@ -100,8 +102,11 @@ interface RawTrace {
   started_at?: string;
   finished_at?: string;
   usage?: { input_tokens?: number; output_tokens?: number };
-  messages?: Array<{ role: string; content: unknown }>;
+  messages?: Array<{ role: string; content?: unknown; tool_calls?: Array<{ id?: unknown; name?: unknown }> }>;
 }
+
+/** Ids the Gemini adapter makes up when the API sends none (@invariant/providers GENERATED_ID_PREFIX): not provider ids, never exported as one. */
+const GENERATED_ID_PREFIX = "invariant-generated:";
 
 function readRaw(store: TraceStore, run: RunRow): RawTrace | null {
   if (!run.trace_blob_ref) return null;
@@ -117,13 +122,19 @@ function readRaw(store: TraceStore, run: RunRow): RawTrace | null {
 function toolUseIds(raw: RawTrace | null, calls: ToolCallRow[]): Array<string | undefined> {
   const uses: Array<{ id: string; name: string }> = [];
   for (const m of raw?.messages ?? []) {
-    if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
-    for (const b of m.content as Array<Record<string, unknown>>) {
-      if (b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string") uses.push({ id: b.id, name: b.name });
+    if (m.role !== "assistant") continue;
+    if (Array.isArray(m.tool_calls)) {
+      // Provider-neutral transcript (current driver): calls in the order the model listed them.
+      for (const c of m.tool_calls) if (typeof c.id === "string" && typeof c.name === "string") uses.push({ id: c.id, name: c.name });
+    } else if (Array.isArray(m.content)) {
+      // Older blobs: Anthropic content blocks.
+      for (const b of m.content as Array<Record<string, unknown>>) {
+        if (b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string") uses.push({ id: b.id, name: b.name });
+      }
     }
   }
   const aligned = uses.length === calls.length && uses.every((u, i) => u.name === calls[i]!.tool_name);
-  return calls.map((_, i) => (aligned ? uses[i]!.id : undefined));
+  return calls.map((_, i) => (aligned && !uses[i]!.id.startsWith(GENERATED_ID_PREFIX) ? uses[i]!.id : undefined));
 }
 
 const ms = (iso: string) => new Date(iso);
@@ -208,8 +219,15 @@ export function planBatchTrace(store: TraceStore, batchId: string, options: Plan
     };
     if (run.deployment_fingerprint) attributes[INV.DEPLOYMENT_FINGERPRINT] = run.deployment_fingerprint;
     if (synthetic) attributes[INV.SYNTHETIC] = true;
-    // A scripted stand-in never talked to a provider, so no provider is claimed for it.
-    else if (raw?.model) attributes[GEN_AI.PROVIDER_NAME] = GEN_AI.PROVIDER_ANTHROPIC;
+    // A scripted stand-in never talked to a provider, so no provider is claimed for it. The
+    // provider comes from the raw trace, else the run's fingerprint; a raw trace written
+    // before the driver was provider-neutral (a model, no provider field) was Anthropic, the
+    // only provider that driver could call.
+    else {
+      const fpProvider = run.deployment_fingerprint ? store.getDeploymentFingerprint(run.deployment_fingerprint)?.provider : null;
+      const provider = raw?.provider ?? fpProvider ?? (raw?.model && raw.provider === undefined ? GEN_AI.PROVIDER_ANTHROPIC : undefined);
+      if (provider && provider !== "scripted") attributes[GEN_AI.PROVIDER_NAME] = provider;
+    }
     if (raw?.model) attributes[GEN_AI.REQUEST_MODEL] = raw.model;
     if (responseModel) attributes[GEN_AI.RESPONSE_MODEL] = responseModel;
     if (typeof raw?.usage?.input_tokens === "number") attributes[GEN_AI.USAGE_INPUT_TOKENS] = raw.usage.input_tokens;

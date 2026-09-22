@@ -7,13 +7,24 @@ import { FpChip, fmtTime, Json, short, SyntheticTag } from "../../components/ui"
 
 export const dynamic = "force-dynamic";
 
-const LABEL = { model_name: "model (requested)", model_version: "model (reported)", system_prompt: "system prompt", tool_schema: "tool schema" } as const;
+const LABEL = {
+  provider: "provider",
+  endpoint: "endpoint",
+  model_name: "model (requested)",
+  model_version: "model (reported)",
+  system_prompt: "system prompt",
+  tool_schema: "tool schema",
+} as const;
 
 function Components({ f }: { f: FingerprintRow }) {
   return (
     <dl className="kv">
       <dt>hash</dt>
-      <dd className="mono">{f.hash}</dd>
+      <dd className="mono">{f.hash} <span className="small muted">formula v{f.fingerprint_version ?? 1}</span></dd>
+      <dt>provider</dt>
+      <dd className="mono">{f.provider ?? <span className="muted">(not recorded: formula v1)</span>}</dd>
+      <dt>endpoint</dt>
+      <dd className="mono">{f.endpoint ?? <span className="muted">(not recorded)</span>}</dd>
       <dt>model (requested)</dt>
       <dd className="mono">{f.model_name}</dd>
       <dt>model (reported)</dt>
@@ -50,8 +61,10 @@ export default async function FingerprintsPage({ searchParams }: { searchParams:
           <span className="muted">{all.length} recorded</span>
         </div>
         <p className="lede">
-          A fingerprint hashes the model asked for, the model the API reported answering, the system prompt, and the exact
-          tool list the proxy exposed (keys canonicalised, tool order kept). Its components are stored with it, so a change
+          A fingerprint hashes the provider and endpoint host, the model asked for, the model the API reported answering,
+          the system prompt, and the exact tool list the proxy exposed (keys canonicalised, tool order kept). Fingerprints
+          recorded before provider and endpoint were components (formula v1) keep their hashes and show those two as not
+          recorded. Its components are stored with it, so a change
           can be read, not just detected.
         </p>
       </>
@@ -67,8 +80,12 @@ export default async function FingerprintsPage({ searchParams }: { searchParams:
           {head}
           <div className={`divergence ${c.changed.length ? "found" : "none"}`}>
             {c.changed.length
-              ? `Changed: ${c.changed.map((x) => LABEL[x]).join(", ")}. Unchanged: ${(["model_name", "model_version", "system_prompt", "tool_schema"] as const).filter((x) => !c.changed.includes(x)).map((x) => LABEL[x]).join(", ") || "nothing"}.`
-              : "Identical fingerprints."}
+              ? `Changed: ${c.changed.map((x) => LABEL[x]).join(", ")}. Unchanged: ${(["provider", "endpoint", "model_name", "model_version", "system_prompt", "tool_schema"] as const).filter((x) => !c.changed.includes(x) && !c.unrecorded.includes(x)).map((x) => LABEL[x]).join(", ") || "nothing"}.` +
+                (c.unrecorded.length ? ` Not recorded on one side: ${c.unrecorded.map((x) => LABEL[x]).join(", ")}.` : "")
+              : c.formula_only
+                ? `Same deployment: the hashes differ only because they were computed with different fingerprint formulas (v${fa.fingerprint_version ?? 1} and v${fb.fingerprint_version ?? 1}); every component both recorded is equal.` +
+                  (c.unrecorded.length ? ` Not recorded on one side: ${c.unrecorded.map((x) => LABEL[x]).join(", ")}.` : "")
+                : "Identical fingerprints."}
           </div>
           <div className="grid2">
             <div className="panel panel-pad"><h2>Before · <FpChip hash={fa.hash} /></h2><Components f={fa} /></div>
@@ -139,6 +156,7 @@ export default async function FingerprintsPage({ searchParams }: { searchParams:
               <thead>
                 <tr>
                   <th>Fingerprint</th>
+                  <th>Provider · endpoint</th>
                   <th>Model (requested)</th>
                   <th>Model (reported)</th>
                   <th>System prompt</th>
@@ -150,7 +168,8 @@ export default async function FingerprintsPage({ searchParams }: { searchParams:
               <tbody>
                 {all.map((f, i) => (
                   <tr key={f.hash}>
-                    <td><FpChip hash={f.hash} /></td>
+                    <td><FpChip hash={f.hash} /> <span className="small muted">v{f.fingerprint_version ?? 1}</span></td>
+                    <td className="mono small">{f.provider ?? <span className="muted">–</span>}{f.endpoint ? ` · ${f.endpoint}` : ""}</td>
                     <td className="mono">{f.model_name}</td>
                     <td className="mono">{f.model_version} {isScriptedStandIn(f.model_version) && <SyntheticTag />}</td>
                     <td className="mono small">{short(f.system_prompt_hash)}</td>

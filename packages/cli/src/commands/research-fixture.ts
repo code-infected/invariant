@@ -11,7 +11,7 @@
  * a model, and nothing in the CLI uses it. The corpus is fictional too (reserved .example
  * domains, invented figures), so the reply below is not a claim about real Rust adoption.
  */
-import type { CallMessagesOptions, MessagesResponse, BatchSummary } from "@invariant/agent-driver";
+import type { CallModel, BatchSummary } from "@invariant/agent-driver";
 import type { TraceStore } from "@invariant/trace-store";
 import type { LoadedTask } from "../lib/load-tasks.js";
 import { scriptedAgent, writeScriptedBatch } from "./princeton-fixture.js";
@@ -29,7 +29,7 @@ const REPLY =
   `[1] Backend Engineering Survey 2026, ${RESEARCH_SOURCES[0]}\n` +
   `[2] Systems Languages in the Enterprise, 2026, ${RESEARCH_SOURCES[1]}`;
 
-export function researchScript(): (options: CallMessagesOptions) => Promise<MessagesResponse> {
+export function researchScript(): CallModel {
   return scriptedAgent(() => [
     { name: "search_web", input: { query: "Rust adoption production backend systems" } },
     { name: "fetch_page", input: { url: RESEARCH_SOURCES[0]! } },

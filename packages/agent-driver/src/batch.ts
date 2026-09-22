@@ -162,7 +162,7 @@ export async function runBatch(plan: BatchPlan, deps: BatchDeps): Promise<BatchS
   const sleep = deps.sleep ?? defaultSleep;
   const emit = deps.onEvent ?? (() => undefined);
   const { store } = deps;
-  const trialDeps: TrialDeps = { store, apiKey: deps.apiKey, log: deps.log, callModel: deps.callModel };
+  const trialDeps: TrialDeps = { store, log: deps.log, callModel: deps.callModel };
 
   const batchId = store.createBatch({
     task_id: plan.task_id,

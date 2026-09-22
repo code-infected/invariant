@@ -1,12 +1,12 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { backoffDelayMs, isRetryableInfraFailure, RETRY_AFTER_CAP_MS, type RetryPolicy } from "./retry.js";
-import { parseRetryAfter } from "./anthropic.js";
+import { parseRetryAfter } from "@invariant/providers";
 
 const policy: RetryPolicy = { max_attempts: 3, retry_on: [429, 503, "timeout"] };
-const provider = (http_status?: number) => ({
+const provider = (http_status?: number, code?: string) => ({
   status: "infra_error" as const,
-  error: { kind: "provider" as const, message: "x", ...(http_status === undefined ? {} : { http_status }) },
+  error: { kind: "provider" as const, message: "x", ...(http_status === undefined ? {} : { http_status }), ...(code === undefined ? {} : { code }) },
 });
 
 describe("isRetryableInfraFailure", () => {
@@ -23,6 +23,20 @@ describe("isRetryableInfraFailure", () => {
   test("does not retry provider statuses the config does not list", () => {
     assert.equal(isRetryableInfraFailure(provider(529), policy), false);
     assert.equal(isRetryableInfraFailure(provider(500), policy), false);
+  });
+
+  test("matches provider error codes by name, but only among infra failures", () => {
+    const withCodes: RetryPolicy = { max_attempts: 3, retry_on: [429, "ThrottlingException", "RESOURCE_EXHAUSTED"] };
+    assert.equal(isRetryableInfraFailure(provider(undefined, "ThrottlingException"), withCodes), true);
+    assert.equal(isRetryableInfraFailure(provider(500, "RESOURCE_EXHAUSTED"), withCodes), true);
+    assert.equal(isRetryableInfraFailure(provider(500, "INTERNAL"), withCodes), false);
+    assert.equal(
+      isRetryableInfraFailure(
+        { status: "infra_error", error: { kind: "provider_rejected", message: "x", http_status: 400, code: "ThrottlingException" } },
+        withCodes
+      ),
+      false
+    );
   });
 
   test("never retries a behavioural outcome or a harness error", () => {

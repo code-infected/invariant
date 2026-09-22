@@ -10,16 +10,20 @@ export interface RetryPolicy {
   max_attempts: number;
   /**
    * HTTP statuses to retry, plus the token "timeout" for provider failures that never got
-   * an HTTP response at all (connection dropped, request timed out in transit).
+   * an HTTP response at all (connection dropped, request timed out in transit), plus any
+   * provider error codes to match by name (e.g. "ThrottlingException", "RESOURCE_EXHAUSTED").
+   * A code only ever widens what is retried among failures already classified as infra;
+   * it cannot turn a rejection (400, 401...) into a retry.
    */
-  retry_on: Array<number | "timeout">;
+  retry_on: Array<number | string>;
 }
 
 /**
  * Whether a finished attempt is an infra flake that should be retried.
  *
- * Only a provider-classified failure (ProviderInfraError) whose status is on the retry
- * list qualifies. Everything else is final on the first attempt:
+ * Only a provider failure classified as infra (ProviderError kind "infra", recorded as
+ * error.kind "provider") whose HTTP status or provider error code is on the retry list
+ * qualifies. Everything else is final on the first attempt:
  *
  *   - ok / timeout: the agent produced a behavioural answer (hitting the task's own wall
  *     clock or turn limit is behaviour too, see ARCHITECTURE.md section 7). Retrying one
@@ -30,7 +34,8 @@ export interface RetryPolicy {
  */
 export function isRetryableInfraFailure(result: Pick<TrialResult, "status" | "error">, policy: RetryPolicy): boolean {
   if (result.status !== "infra_error" || result.error?.kind !== "provider") return false;
-  const status = result.error.http_status;
+  const { http_status: status, code } = result.error;
+  if (code !== undefined && policy.retry_on.includes(code)) return true;
   if (status === undefined) return policy.retry_on.includes("timeout");
   return policy.retry_on.includes(status);
 }

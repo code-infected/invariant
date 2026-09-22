@@ -202,6 +202,23 @@
         {
           "type": "object",
           "properties": {
+            "provider": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Provider that served the model, e.g. \"openai\", \"ollama\", \"anthropic\". Omit when unknown; ingest then records it as not recorded"
+            },
+            "endpoint": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Host (and port) of the endpoint that answered, e.g. \"api.openai.com\", \"localhost:11434\". Host only: never a path or credentials. Null or omitted when unknown"
+            },
             "model_name": {
               "type": "string",
               "minLength": 1,

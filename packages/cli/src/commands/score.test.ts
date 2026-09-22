@@ -20,6 +20,7 @@ import { loadConfig } from "../lib/config.js";
 import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { renderReport, resolveBatch, runScore, scoreStoredBatch } from "./score.js";
 import { writePrincetonBatch } from "./princeton-fixture.js";
+import { clearConfiguredCredentials, judgeMissingKeyPattern } from "../lib/models.js";
 
 /**
  * A rule-based stand-in for the LLM judge, for exercising the outcome axis's clustering
@@ -108,9 +109,8 @@ describe("invariant score on a SYNTHETIC reproduction of the Princeton refund sc
     if (process.env.INVARIANT_SHOW_REPORT) console.log(report);
   });
 
-  test("without ANTHROPIC_API_KEY the outcome axis is reported not computed, the rest still scored and saved", async () => {
-    const saved = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+  test("without the judge's key the outcome axis is reported not computed, the rest still scored and saved", async () => {
+    const restore = clearConfiguredCredentials(loadConfig());
     const lines: string[] = [];
     const exitBefore = process.exitCode;
     try {
@@ -121,12 +121,13 @@ describe("invariant score on a SYNTHETIC reproduction of the Princeton refund sc
       assert.equal(process.exitCode, 1, "an axis without a score makes the command exit nonzero");
     } finally {
       process.exitCode = exitBefore;
-      if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
+      restore();
     }
     const report = lines.join("\n");
     assert.match(report, /state-mutation\s+0\.600\s+>= 1\.000\s+FAIL/);
     assert.match(report, /outcome\s+-\s+>= 0\.900\s+NOT COMPUTED/);
-    assert.match(report, /ANTHROPIC_API_KEY is not set/);
+    assert.match(report, judgeMissingKeyPattern(loadConfig()));
+    assert.match(report, /no offline fallback/);
     const latest = store.getScores(summary.batch_id)[0]!;
     assert.equal(latest.state_mutation_consistency, 0.6);
     assert.equal(latest.outcome_consistency, null);

@@ -100,7 +100,7 @@ export function Deployment({ d, compact }: { d: BatchDeployment; compact?: boole
       {d.fingerprints.map((f) => (
         <div key={f.hash} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
           <FpChip hash={f.hash} synthetic={f.synthetic} />
-          {!compact && <span className="mono small ink2">{f.model_version}</span>}
+          {!compact && <span className="mono small ink2">{f.provider ? `${f.provider} · ` : ""}{f.model_version}</span>}
           {d.fingerprints.length > 1 && <span className="small muted">{f.runs} run{f.runs === 1 ? "" : "s"}</span>}
         </div>
       ))}
@@ -113,6 +113,11 @@ export function Deployment({ d, compact }: { d: BatchDeployment; compact?: boole
       {d.mixed && (
         <span className="tag tag-warn" title="The deployment changed during this batch; its scores partly measure that change">
           ⚠ MIXED: {d.changed.join(", ").replace(/_/g, " ")} changed mid-batch
+        </span>
+      )}
+      {d.formula_only && (
+        <span className="tag" title="Two fingerprint hashes, but every component both recorded is equal: the hashing formula changed, not the deployment">
+          same deployment, fingerprint formula v{d.formula_versions.join(" and v")}
         </span>
       )}
     </div>

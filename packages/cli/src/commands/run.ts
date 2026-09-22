@@ -1,7 +1,6 @@
 import path from "node:path";
 import { openTraceStore, type TraceStore } from "@invariant/trace-store";
 import {
-  requireApiKey,
   runBatch,
   runTrial,
   type BatchEvent,
@@ -9,6 +8,7 @@ import {
   type TrialPlan,
 } from "@invariant/agent-driver";
 import { loadConfig } from "../lib/config.js";
+import { describeAgent, requireCredentials, requireRole } from "../lib/models.js";
 import { loadAllTasks, loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { selectTier, type Tier } from "../lib/tier.js";
@@ -26,6 +26,7 @@ export interface RunOptions {
   trial?: number;
   /** Overrides execution.worker_concurrency. */
   concurrency?: number;
+  /** --model=provider:model: overrides models.agent (see lib/models.ts withOverride). */
   model?: string;
   /**
    * Tier runs only: skip (and name) tasks with no registered tool server, or whose server
@@ -120,7 +121,8 @@ export function syncTask(
  */
 async function runSingle(taskName: string, variantLabel: string, trial: number, opts: RunOptions): Promise<void> {
   // Fail before touching the trace store, so a missing key does not leave a half-open run.
-  requireApiKey();
+  const agent = requireRole(loadConfig(), "agent", opts.model);
+  requireCredentials("agent", agent);
 
   const task = loadValidTask(taskName);
   const fixture = task.fixture!;
@@ -148,10 +150,11 @@ async function runSingle(taskName: string, variantLabel: string, trial: number, 
       dangerous_tools: task.spec.tools.dangerous,
       upstream,
       max_wall_clock_seconds: task.spec.execution.max_wall_clock_seconds,
-      model: opts.model,
+      model: agent,
     };
 
     console.log(`Running ${task.spec.name} / variant ${variant.id} / trial ${trial}`);
+    console.log(`  agent : ${describeAgent(agent)}`);
     console.log(`  tools : ${server} (${describeUpstream(upstream)})`);
     console.log(`  prompt: ${variant.text}`);
     console.log("");
@@ -184,8 +187,9 @@ async function runSingle(taskName: string, variantLabel: string, trial: number, 
  * scoring engine's and the gate's call, not this command's.
  */
 async function runTier(opts: RunOptions): Promise<void> {
-  requireApiKey();
   const config = loadConfig();
+  const agent = requireRole(config, "agent", opts.model);
+  requireCredentials("agent", agent);
   const tier = opts.tier ?? config.execution.default_tier;
   const concurrency = opts.concurrency ?? config.execution.worker_concurrency;
   const retry = config.providers.retry;
@@ -206,7 +210,8 @@ async function runTier(opts: RunOptions): Promise<void> {
       console.error(
         `${task.spec.name}: ${tier} tier, ${selection.variants.length} variant(s) x ${selection.trials} trial(s) = ` +
           `${selection.variants.length * selection.trials} runs, concurrency ${concurrency}, ` +
-          `up to ${retry.max_attempts} attempt(s) per run on [${retry.retry_on.join(", ")}], tool server ${server}`
+          `up to ${retry.max_attempts} attempt(s) per run on [${retry.retry_on.join(", ")}], tool server ${server}, ` +
+          `agent ${describeAgent(agent)}`
       );
       if (selection.shortfall > 0) {
         console.error(
@@ -232,7 +237,7 @@ async function runTier(opts: RunOptions): Promise<void> {
             dangerous_tools: task.spec.tools.dangerous,
             upstream,
             max_wall_clock_seconds: task.spec.execution.max_wall_clock_seconds,
-            model: opts.model,
+            model: agent,
           },
           concurrency,
           retry,

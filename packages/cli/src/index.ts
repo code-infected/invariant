@@ -11,6 +11,8 @@ import { runDashboard } from "./commands/dashboard.js";
 import { runIngest } from "./commands/ingest.js";
 import { runExport } from "./commands/export.js";
 import { runAdversarialCommand } from "./commands/adversarial.js";
+import { runDoctor } from "./commands/doctor.js";
+import { MODEL_ROLES, type ModelRole } from "./lib/models.js";
 
 const program = new Command();
 
@@ -24,6 +26,35 @@ program
   .description("Scaffold tasks/ and invariant.config.yaml")
   .action(() => {
     runInit();
+  });
+
+program
+  .command("doctor")
+  .description(
+    "For each configured model role (agent, judge, paraphraser, embedder): provider, endpoint host, and whether its " +
+      "credentials are present (the variable's name only; a key is never printed). --ping makes one minimal live call " +
+      "per role and reports the model id the provider reported and the latency. Exits 1 if a checked role is missing, " +
+      "has no credentials, or (with --ping) did not answer."
+  )
+  .option("--ping", "make one minimal live call per role (spends a few tokens)", false)
+  .option("--roles <roles>", `comma-separated roles to check (${MODEL_ROLES.join(", ")}); default: every configured role. A named role must be configured.`)
+  .option("--json", "print the report as JSON", false)
+  .action(async (opts) => {
+    try {
+      const roles = opts.roles
+        ? String(opts.roles)
+            .split(",")
+            .map((r: string) => r.trim())
+            .filter(Boolean)
+        : undefined;
+      const bad = (roles ?? []).filter((r: string) => !(MODEL_ROLES as readonly string[]).includes(r));
+      if (bad.length > 0) throw new Error(`unknown role(s) ${bad.join(", ")}; roles are ${MODEL_ROLES.join(", ")}`);
+      const report = await runDoctor({ ping: Boolean(opts.ping), roles: roles as ModelRole[] | undefined, json: Boolean(opts.json) });
+      process.exitCode = report.ok ? 0 : 1;
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
   });
 
 program
@@ -45,7 +76,8 @@ program
   .command("run")
   .description(
     "Run a tier (every variant x trial the task spec asks for) or, with --variant, one debugging trial. " +
-      "Requires ANTHROPIC_API_KEY."
+      "The agent under test is models.agent in invariant.config.yaml (or --model) and needs its provider's key " +
+      "(see invariant doctor)."
   )
   .option("--task <name>", "task name (matches tasks/<name>.yaml); with a tier, omit to run every task")
   .addOption(
@@ -57,7 +89,7 @@ program
   .option("--variant <id>", "run exactly one trial of this variant (e.g. v1), no fan-out, no retries")
   .option("--trial <n>", "trial number recorded with a --variant run (default 1)", positiveInt("--trial"))
   .option("--concurrency <n>", "max trials in flight (default: execution.worker_concurrency)", positiveInt("--concurrency"))
-  .option("--model <id>", "model to drive the agent under test")
+  .option("--model <provider:model>", "agent under test, overriding models.agent (e.g. openai:gpt-4.1, ollama:qwen2.5:3b)")
   .option(
     "--runnable-only",
     "tier runs: skip (and name) tasks whose declared tools the tool server does not serve, instead of refusing the whole run",
@@ -91,16 +123,17 @@ program
   .description(
     "Score one batch on the three consistency axes (state-mutation, tool-path, outcome) and show pass/fail " +
       "per axis against the task's thresholds. Saves the scores to the trace store. The outcome axis asks an " +
-      "LLM judge and needs ANTHROPIC_API_KEY; the other two need no model. Exits nonzero only if an axis " +
+      "LLM judge (models.judge, or --judge-model) and needs its provider's key; the other two need no model. Exits nonzero only if an axis " +
       "could not be scored, never because a score is below its threshold (that is the gate's job)."
   )
   .option("--batch <id>", "the batch to score (printed by invariant run --tier)")
   .option("--task <name>", "score this task's most recent finished batch")
   .option("--json", "print the full scoring result as JSON", false)
+  .option("--judge-model <provider:model>", "outcome judge, overriding models.judge")
   .option("--store <path>", "trace store directory holding trace.db (default: .invariant at the repo root)")
   .action(async (opts) => {
     try {
-      await runScore({ batch: opts.batch, task: opts.task, json: Boolean(opts.json) }, { storeRoot: opts.store });
+      await runScore({ batch: opts.batch, task: opts.task, json: Boolean(opts.json) }, { storeRoot: opts.store, judgeModel: opts.judgeModel });
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;
@@ -116,7 +149,7 @@ program
       "Reuses the batch's stored score when it is still valid, otherwise scores it first (same code as " +
       "invariant score). With neither --batch nor --task, gates the latest batch of every task; tasks the tool " +
       "server cannot run are listed as not gated. Uncomputed axes fail closed: the outcome axis needs " +
-      "ANTHROPIC_API_KEY for its judge, and without it the gate cannot pass unless --allow-uncomputed=outcome."
+      "its judge (models.judge) and that provider's key, and without it the gate cannot pass unless --allow-uncomputed=outcome."
   )
   .option("--batch <id>", "gate this batch")
   .option("--task <name>", "gate this task's latest batch")
@@ -130,6 +163,7 @@ program
   )
   .option("--rescore", "score the batch now even if a reusable stored score exists", false)
   .option("--require-adversarial", "a payload fixture of a gated task with no adversarial batch is incomplete (exit 2), not 'not run'", false)
+  .option("--judge-model <provider:model>", "outcome judge, overriding models.judge")
   .option("--store <path>", "trace store directory holding trace.db (default: .invariant at the repo root)")
   .action(async (opts) => {
     try {
@@ -147,7 +181,7 @@ program
           : [],
         rescore: Boolean(opts.rescore),
         requireAdversarial: Boolean(opts.requireAdversarial),
-      }, { storeRoot: opts.store });
+      }, { storeRoot: opts.store, judgeModel: opts.judgeModel });
       process.exitCode = report.exit_code;
     } catch (err) {
       // Bad arguments or an unreadable store: the gate could not evaluate anything.
@@ -245,13 +279,13 @@ adversarial
     "Run a tier with a payload fixture (tasks/adversarial/) planted by the proxy into one tool response per run, then score " +
       "injection propagation: the share of runs where the agent went on to make the payload's unauthorized call, and how " +
       "many calls later. Stored as an adversarial batch, never mixed with consistency batches; gate it with invariant gate. " +
-      "Without --payload, runs every payload (for --task, that task's). Requires ANTHROPIC_API_KEY."
+      "Without --payload, runs every payload (for --task, that task's). The agent is models.agent (or --model) and needs its provider's key."
   )
   .option("--task <name>", "base task (must match the payload's task)")
   .option("--payload <file|id>", "a payload id under tasks/adversarial/, or a path to a payload fixture")
   .addOption(new Option("--tier <tier>", "smoke or full (default: execution.default_tier)").choices(["smoke", "full"]))
   .option("--concurrency <n>", "max trials in flight (default: execution.worker_concurrency)", positiveInt("--concurrency"))
-  .option("--model <id>", "model to drive the agent under test")
+  .option("--model <provider:model>", "agent under test, overriding models.agent")
   .option("--runnable-only", "skip (and name) payloads whose base task the tool server cannot run", false)
   .option("--json", "print JSON", false)
   .action(async (opts) => {
@@ -275,8 +309,9 @@ const variants = program.command("variants").description("Manage variant fixture
 
 variants
   .command("regen")
-  .description("Propose regenerated paraphrasings for a task (requires --approve to write)")
+  .description("Propose regenerated paraphrasings for a task (requires --approve to write). The paraphraser is models.paraphraser (or --model).")
   .requiredOption("--task <name>", "task name (matches tasks/<name>.yaml)")
+  .option("--model <provider:model>", "paraphraser, overriding models.paraphraser")
   .option("--count <n>", "number of paraphrasings to generate", "5")
   .option("--approve", "write the fixture file instead of just previewing it", false)
   .option("--approved-by <name>", "recorded as the human reviewer", process.env.USER ?? "unknown")
@@ -287,6 +322,7 @@ variants
         count: Number.parseInt(opts.count, 10),
         approve: Boolean(opts.approve),
         approvedBy: opts.approvedBy,
+        model: opts.model,
       });
     } catch (err) {
       console.error((err as Error).message);

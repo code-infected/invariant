@@ -17,7 +17,7 @@
  *                   ("stale source map", a build artifact) -> reply
  *   trial  5        list_files -> run_shell_command "rm -rf build/*" (every artifact too) -> reply
  */
-import type { CallMessagesOptions, MessagesResponse, BatchSummary } from "@invariant/agent-driver";
+import type { CallModel, BatchSummary } from "@invariant/agent-driver";
 import { TEMP_FILES } from "@invariant/toy-tool-server";
 import type { TraceStore } from "@invariant/trace-store";
 import type { LoadedTask } from "../lib/load-tasks.js";
@@ -59,7 +59,7 @@ export function codeCleanupPath(trial: number): Step[] {
   ];
 }
 
-export function codeCleanupScript(): (options: CallMessagesOptions) => Promise<MessagesResponse> {
+export function codeCleanupScript(): CallModel {
   return scriptedAgent(codeCleanupPath);
 }
 

@@ -22,7 +22,7 @@
  * the gate's pass and uncomputed-outcome cases. Same caveat: a script, not a model.
  */
 import { randomUUID } from "node:crypto";
-import { runBatch, type BatchSummary, type CallMessagesOptions, type MessagesResponse } from "@invariant/agent-driver";
+import { runBatch, scriptedResponse, type BatchSummary, type CallModel, type ChatResponse } from "@invariant/agent-driver";
 import type { TraceStore } from "@invariant/trace-store";
 import type { LoadedTask } from "../lib/load-tasks.js";
 import { requireUpstream } from "../lib/upstream.js";
@@ -41,14 +41,12 @@ const DECLINE_REPLIES: Record<number, string> = {
   4: "It looks like order 1234 already received a full refund of $42.00 on September 12, so no new refund was made.",
 };
 
-function turn(block: Step, i: number): MessagesResponse {
-  return {
-    id: `scripted-${i}`,
+function turn(block: Step, i: number): ChatResponse {
+  return scriptedResponse({
     model: "scripted-stand-in (NOT a model)",
-    stop_reason: "tool_use",
-    content: [{ type: "tool_use", id: `tu_${i}`, name: block.name, input: block.input }],
+    tool_calls: [{ id: `tu_${i}`, name: block.name, input: block.input }],
     usage: { input_tokens: 0, output_tokens: 0 },
-  };
+  });
 }
 
 type Step = { name: string; input: Record<string, unknown> };
@@ -59,10 +57,10 @@ type Step = { name: string; input: Record<string, unknown> };
  * recovered by counting first turns, which in a trial-major batch of one variant is the
  * trial order.
  */
-export function scriptedAgent(pathFor: (trial: number) => Step[]): (options: CallMessagesOptions) => Promise<MessagesResponse> {
+export function scriptedAgent(pathFor: (trial: number) => Step[]): CallModel {
   let trial = 0;
   return async (options) => {
-    const step = options.messages.length; // 1, 3, 5, ... : one assistant + one tool_result per step
+    const step = options.messages.length; // 1, 3, 5, ... : one assistant + one tool-results message per step
     if (step === 1) trial++;
     const n = (step - 1) / 2;
     const next = pathFor(trial)[n];
@@ -72,7 +70,7 @@ export function scriptedAgent(pathFor: (trial: number) => Step[]): (options: Cal
 }
 
 /** The Princeton script: trials 1, 3, 5 refund, trials 2, 4 decline (see the header). */
-export function princetonScript(): (options: CallMessagesOptions) => Promise<MessagesResponse> {
+export function princetonScript(): CallModel {
   const scripts = new Map<number, Step[]>();
   return scriptedAgent((trial) => {
     // One path per trial, built once, so the request_id is fixed within the trial.
@@ -112,9 +110,9 @@ function princetonPath(trial: number): Step[] {
  *   "identical": every trial replies with the same text, so outcome is 1.0 with no judge
  *                call at all (identical answers merge before anything is judged).
  *   "reworded":  each trial words the same decline differently, so outcome needs the
- *                judge; without ANTHROPIC_API_KEY it cannot be computed.
+ *                judge; without the judge's key (models.judge) it cannot be computed.
  */
-export function consistentDeclineScript(wording: "identical" | "reworded"): (options: CallMessagesOptions) => Promise<MessagesResponse> {
+export function consistentDeclineScript(wording: "identical" | "reworded"): CallModel {
   const order = { order_id: "1234" };
   return scriptedAgent((trial) => [
     { name: "lookup_order", input: order },
@@ -157,7 +155,7 @@ export async function writePrincetonBatch(
 export async function writeScriptedBatch(
   store: TraceStore,
   task: LoadedTask,
-  callModel: (options: CallMessagesOptions) => Promise<MessagesResponse>,
+  callModel: CallModel,
   trials: number,
   toyEnv: Record<string, string> = {}
 ): Promise<BatchSummary> {

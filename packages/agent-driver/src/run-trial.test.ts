@@ -17,32 +17,27 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { computeDeploymentFingerprint, openTraceStore } from "@invariant/trace-store";
 import { runTrial, type TrialPlan } from "./index.js";
-import type { CallMessagesOptions, MessagesResponse } from "./anthropic.js";
+import { ProviderError, scriptedResponse, type ChatResponse, type ToolCall } from "@invariant/providers";
+import type { ModelCallRequest } from "./run-trial.js";
 
 const require_ = createRequire(import.meta.url);
 const TOY_SERVER_BIN = require_.resolve("@invariant/toy-tool-server/bin");
 const SANDBOX_RESPONSE = '{"status": "sandboxed", "refund_id": "sandbox-0001"}';
 
-function assistantTurn(blocks: MessagesResponse["content"], stop: string): MessagesResponse {
-  return {
-    id: "msg_test",
-    model: "scripted-stand-in",
-    stop_reason: stop,
-    content: blocks,
-    usage: { input_tokens: 10, output_tokens: 5 },
-  };
+function assistantTurn(calls: ToolCall[], text = ""): ChatResponse {
+  return scriptedResponse({ text, tool_calls: calls });
 }
 
-function scriptedModel(turns: MessagesResponse[]): {
-  call: (o: CallMessagesOptions) => Promise<MessagesResponse>;
-  seen: CallMessagesOptions[];
+function scriptedModel(turns: ChatResponse[]): {
+  call: (o: ModelCallRequest) => Promise<ChatResponse>;
+  seen: ModelCallRequest[];
 } {
-  const seen: CallMessagesOptions[] = [];
+  const seen: ModelCallRequest[] = [];
   let i = 0;
   return {
     seen,
     call: async (options) => {
-      seen.push(options);
+      seen.push({ ...options, messages: [...options.messages] });
       const turn = turns[i++];
       if (!turn) throw new Error("scripted model ran out of turns");
       return turn;
@@ -88,27 +83,13 @@ describe("runTrial", () => {
     const model = scriptedModel([
       assistantTurn(
         [
-          { type: "text", text: "Checking the order first." },
-          { type: "tool_use", id: "t1", name: "lookup_order", input: { order_id: "1234" } },
-          { type: "tool_use", id: "t2", name: "check_refund_history", input: { order_id: "1234" } },
+          { id: "t1", name: "lookup_order", input: { order_id: "1234" } },
+          { id: "t2", name: "check_refund_history", input: { order_id: "1234" } },
         ],
-        "tool_use"
+        "Checking the order first."
       ),
-      assistantTurn(
-        [{ type: "tool_use", id: "t3", name: "process_refund", input: { order_id: "1234", amount: 42 } }],
-        "tool_use"
-      ),
-      assistantTurn(
-        [
-          {
-            type: "tool_use",
-            id: "t4",
-            name: "reply_to_user",
-            input: { message: "That order was already refunded on 2026-09-12." },
-          },
-        ],
-        "tool_use"
-      ),
+      assistantTurn([{ id: "t3", name: "process_refund", input: { order_id: "1234", amount: 42 } }]),
+      assistantTurn([{ id: "t4", name: "reply_to_user", input: { message: "That order was already refunded on 2026-09-12." } }]),
     ]);
 
     try {
@@ -153,12 +134,17 @@ describe("runTrial", () => {
       assert.ok(fpHash);
       assert.equal(result.deployment_fingerprint, fpHash);
       const fp = store.getDeploymentFingerprint(fpHash)!;
-      assert.equal(fp.model_name, "claude-sonnet-4-5");
+      // No model in the plan: a scripted run is recorded as exactly that, never as a real model.
+      assert.equal(fp.model_name, "scripted-stand-in");
+      assert.equal(fp.provider, "scripted");
+      assert.equal(fp.fingerprint_version, 2);
       assert.equal(fp.model_version, "scripted-stand-in");
       assert.equal(fp.system_prompt, model.seen[0]!.system);
       assert.equal(
         fp.hash,
         computeDeploymentFingerprint({
+          provider: "scripted",
+          endpoint: null,
           model_name: model.seen[0]!.model,
           model_version: "scripted-stand-in",
           system_prompt: model.seen[0]!.system,
@@ -177,7 +163,7 @@ describe("runTrial", () => {
 
   test("ends the run when the agent answers in prose instead of calling reply_to_user", async () => {
     const { store, root, taskId, variantId } = freshStore();
-    const model = scriptedModel([assistantTurn([{ type: "text", text: "I need more detail." }], "end_turn")]);
+    const model = scriptedModel([assistantTurn([], "I need more detail.")]);
     try {
       const result = await runTrial(makePlan(taskId, variantId), { store, callModel: model.call });
       assert.equal(result.status, "ok");
@@ -196,13 +182,15 @@ describe("runTrial", () => {
       const result = await runTrial(makePlan(taskId, variantId), {
         store,
         callModel: async () => {
-          const { ProviderInfraError } = await import("./anthropic.js");
-          throw new ProviderInfraError("Anthropic API request failed (529): overloaded", 529);
+          throw new ProviderError("anthropic API request failed (529): overloaded", { provider: "anthropic", kind: "infra", status: 529, code: "overloaded_error" });
         },
       });
       assert.equal(result.status, "infra_error");
       assert.equal(result.stop_reason, "error");
       assert.equal(result.error?.kind, "provider");
+      assert.equal(result.error?.http_status, 529);
+      assert.equal(result.error?.code, "overloaded_error");
+      assert.equal(result.error?.provider, "anthropic");
       assert.equal(result.record.run.status, "infra_error");
       assert.ok(result.record.run.trace_blob_ref);
       // No model ever answered, so the model version is unknown: no fingerprint, not a guess.
@@ -237,9 +225,8 @@ describe("runTrial", () => {
         {
           store,
           callModel: async () => {
-            const { ProviderInfraError } = await import("./anthropic.js");
             await new Promise((r) => setTimeout(r, 120));
-            throw new ProviderInfraError("This operation was aborted");
+            throw new ProviderError("anthropic request failed with no response: This operation was aborted", { provider: "anthropic", kind: "infra" });
           },
         }
       );
@@ -254,10 +241,7 @@ describe("runTrial", () => {
 
   test("stops at the turn limit rather than looping forever", async () => {
     const { store, root, taskId, variantId } = freshStore();
-    const loop = assistantTurn(
-      [{ type: "tool_use", id: "t", name: "lookup_order", input: { order_id: "1234" } }],
-      "tool_use"
-    );
+    const loop = assistantTurn([{ id: "t", name: "lookup_order", input: { order_id: "1234" } }]);
     try {
       const result = await runTrial(
         { ...makePlan(taskId, variantId), max_turns: 3 },

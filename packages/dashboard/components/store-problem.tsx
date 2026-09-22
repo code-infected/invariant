@@ -16,7 +16,7 @@ export function StoreProblem({ state }: { state: StoreState }) {
         {state.kind !== "missing" && "message" in state && state.message}
       </p>
       {state.kind === "missing" && (
-        <pre>{`invariant run --tier=smoke                     # real runs (needs ANTHROPIC_API_KEY)
+        <pre>{`invariant run --tier=smoke                     # real runs (needs the models.agent key; see invariant doctor)
 invariant demo-seed --store=.invariant-demo    # SYNTHETIC demo data
 invariant dashboard --store=.invariant-demo`}</pre>
       )}

@@ -15,6 +15,8 @@ import { runGate, type EvaluatedTaskReport } from "./gate.js";
 import { runScore } from "./score.js";
 import { syncTask } from "./run.js";
 import { assertDemoStorePath } from "./demo-seed.js";
+import { clearConfiguredCredentials } from "../lib/models.js";
+import { loadConfig } from "../lib/config.js";
 
 const tools = [{ name: "lookup_order", description: "d", input_schema: { type: "object" } }];
 const fpA = computeDeploymentFingerprint({ model_name: "m", model_version: "m-2026-01", system_prompt: "p", tool_schema: tools });
@@ -39,13 +41,12 @@ function writeBatch(store: TraceStore, fingerprints: Array<string | null>): stri
 
 describe("mixed deployment fingerprints in score and gate", () => {
   let root: string;
-  let savedKey: string | undefined;
+  let restoreCredentials: () => void = () => undefined;
   let mixed: string;
   let uniform: string;
 
   before(() => {
-    savedKey = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    restoreCredentials = clearConfiguredCredentials(loadConfig());
     root = fs.mkdtempSync(path.join(os.tmpdir(), "invariant-fp-warning-"));
     const store = openTraceStore({ root });
     try {
@@ -56,7 +57,7 @@ describe("mixed deployment fingerprints in score and gate", () => {
     }
   });
   after(() => {
-    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+    restoreCredentials();
     fs.rmSync(root, { recursive: true, force: true });
   });
 

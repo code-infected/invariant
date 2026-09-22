@@ -5,7 +5,7 @@
  * (code-cleanup-fixture.ts, research-fixture.ts), not a live model. Everything else is
  * real: the committed task specs, the tool-server registry picking each task's toy server,
  * the batch runner, the MCP proxy and its sandbox, the trace store, the scorer. The
- * judge is never called: ANTHROPIC_API_KEY is removed for the suite.
+ * judge is never called: every credential the configured model roles read is removed for the suite.
  *
  * Set INVARIANT_SHOW_REPORT=1 to print the rendered reports.
  */
@@ -23,6 +23,7 @@ import { toolCoverage, upstreamForTask } from "../lib/upstream.js";
 import { renderReport, scoreStoredBatch } from "./score.js";
 import { BROAD_COMMAND, EXTRA_ARTIFACT_DELETED, writeCodeCleanupBatch } from "./code-cleanup-fixture.js";
 import { RESEARCH_SOURCES, writeResearchBatch } from "./research-fixture.js";
+import { clearConfiguredCredentials } from "../lib/models.js";
 
 const readLog = (file: string) =>
   fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
@@ -55,11 +56,10 @@ describe("SYNTHETIC batches of the code and research tasks (scripted stand-ins, 
   let research: BatchSummary;
   let codeLog: string;
   let researchLog: string;
-  let savedKey: string | undefined;
+  let restoreCredentials: () => void = () => undefined;
 
   before(async () => {
-    savedKey = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    restoreCredentials = clearConfiguredCredentials(loadConfig());
     root = fs.mkdtempSync(path.join(os.tmpdir(), "invariant-task-fixtures-"));
     codeLog = path.join(root, "code-side-effects.jsonl");
     researchLog = path.join(root, "research-side-effects.jsonl");
@@ -71,7 +71,7 @@ describe("SYNTHETIC batches of the code and research tasks (scripted stand-ins, 
   });
 
   after(() => {
-    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+    restoreCredentials();
     store?.close();
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });

@@ -15,7 +15,8 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import { openTraceStore, type TraceStore } from "@invariant/trace-store";
 import { runBatch, type BatchDeps, type BatchPlan } from "./batch.js";
-import { ProviderInfraError, type CallMessagesOptions, type MessagesResponse } from "./anthropic.js";
+import { ProviderError, scriptedResponse, type ChatResponse } from "@invariant/providers";
+import type { ModelCallRequest } from "./run-trial.js";
 import type { TrialPlan, TrialResult, TrialError } from "./run-trial.js";
 
 const require_ = createRequire(import.meta.url);
@@ -321,30 +322,18 @@ describe("runBatch", () => {
     const f = fixture(2);
     try {
       let rateLimited = false;
-      const callModel = async (options: CallMessagesOptions): Promise<MessagesResponse> => {
-        const prompt = options.messages[0]!.content as string;
+      const callModel = async (options: ModelCallRequest): Promise<ChatResponse> => {
+        const first = options.messages[0]!;
+        const prompt = first.role === "user" ? first.content : "";
         const turn = options.messages.length; // 1 on the first model call of an attempt
         if (prompt.includes("v2") && turn === 1 && !rateLimited) {
           rateLimited = true;
-          throw new ProviderInfraError("Anthropic API request failed (429): rate_limit_error", 429, 0);
+          throw new ProviderError("anthropic API request failed (429): rate_limit_error", { provider: "anthropic", kind: "infra", status: 429, retryAfterMs: 0 });
         }
-        const usage = { input_tokens: 10, output_tokens: 5 };
         if (turn === 1) {
-          return {
-            id: "m",
-            model: "scripted-stand-in",
-            stop_reason: "tool_use",
-            content: [{ type: "tool_use", id: "t1", name: "check_refund_history", input: { order_id: "1234" } }],
-            usage,
-          };
+          return scriptedResponse({ tool_calls: [{ id: "t1", name: "check_refund_history", input: { order_id: "1234" } }] });
         }
-        return {
-          id: "m",
-          model: "scripted-stand-in",
-          stop_reason: "tool_use",
-          content: [{ type: "tool_use", id: "t2", name: "reply_to_user", input: { message: "Already refunded." } }],
-          usage,
-        };
+        return scriptedResponse({ tool_calls: [{ id: "t2", name: "reply_to_user", input: { message: "Already refunded." } }] });
       };
 
       const summary = await runBatch(f.plan({ trials: 2, concurrency: 2 }), {
