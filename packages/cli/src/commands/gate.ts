@@ -23,7 +23,7 @@
  * run is listed as "not_run" and does not affect the verdict, unless --require-adversarial,
  * where it is incomplete (CI runs the payloads first and passes that flag).
  *
- * Uncomputed axes fail closed. The outcome axis needs the LLM judge (ANTHROPIC_API_KEY);
+ * Uncomputed axes fail closed. The outcome axis needs the LLM judge (models.judge and its provider's key);
  * a gate that passed because the judge never ran would be exactly the kind of silent
  * dishonesty this project exists to catch. `--allow-uncomputed=outcome` opts out, and
  * the report then says "pass_with_waivers" and names the waived axis rather than "pass".
@@ -129,6 +129,7 @@ import {
   resolveBatch,
   scoreStoredBatch,
   scoringKey,
+  judgeTemperatureText,
   scoringTask,
   specDrift,
   type JudgeSettings,
@@ -186,7 +187,8 @@ export interface OutcomeEvidence {
   summary: string;
   clusters: Array<{ runs: number; sample: string | null; trials: string[]; run_ids: string[] }>;
   judged_pairs: number;
-  judge: { model: string; temperature: number; votes: number; injected: boolean };
+  /** temperature is "unsupported" when the judge's provider refused it and it ran without (see @invariant/scoring judge.ts). */
+  judge: { model: string; temperature: number | "unsupported"; temperature_requested?: number; votes: number; injected: boolean; reported_models?: string[] };
   notes: string[];
 }
 export type AxisEvidence = StateMutationEvidence | ToolPathEvidence | OutcomeEvidence;
@@ -780,7 +782,7 @@ export function evidenceLines(axis: AxisName, evidence: AxisEvidence): string[] 
     });
     if (e.judged_pairs > 0) {
       lines.push(
-        `judge: ${e.judge.injected ? "an injected judge" : e.judge.model}, temperature ${e.judge.temperature}, majority of ${e.judge.votes}`
+        `judge: ${e.judge.injected ? "an injected judge" : e.judge.model}, ${judgeTemperatureText({ temperature: e.judge.temperature, temperature_requested: e.judge.temperature_requested ?? 0 })}, majority of ${e.judge.votes}`
       );
     }
   }

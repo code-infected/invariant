@@ -17,6 +17,7 @@
     "@invariant/agent-driver": "*",
     "@invariant/mcp-proxy": "*",
     "@invariant/otel-export": "*",
+    "@invariant/providers": "*",
     "@invariant/scoring": "*",
     "@invariant/toy-tool-server": "*",
     "@invariant/trace-store": "*",

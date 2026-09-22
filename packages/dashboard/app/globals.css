@@ -191,6 +191,8 @@ details summary { cursor: pointer; font-size: 11.5px; color: var(--ink-2); }
 .chart .thr { stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 4 3; }
 .chart .fpmark { stroke: var(--warn); stroke-width: 1.5; stroke-dasharray: 2 2; }
 .chart .fplbl { fill: var(--warn); font-weight: 700; font-size: 10.5px; }
+.chart .fpmark-formula { stroke: var(--muted); }
+.chart .fplbl-formula { fill: var(--muted); font-weight: 400; }
 .chart .nc { fill: var(--muted); font-size: 10px; }
 
 form.inline { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { levenshtein, scoreBatch, unavailableJudge, type ScoringTask } from "@invariant/scoring";
-import { computeDeploymentFingerprint, openTraceStore, SCHEMA_SQL, type TraceStore } from "@invariant/trace-store";
+import { computeDeploymentFingerprint, computeDeploymentFingerprintV1, openTraceStore, SCHEMA_SQL, type TraceStore } from "@invariant/trace-store";
 import { align, alignmentDistance } from "./align";
 import { getBatchDetail, memberSummary } from "./batch";
 import { diffRuns, maskedPaths } from "./diff";
@@ -77,7 +77,7 @@ async function writeBatch(store: TraceStore, kinds: Kind[], fps: Array<string | 
     runs.push({ run_id: runId, status: kind === "infra" ? "infra_error" : "ok", final_output: final, tool_calls: store.getToolCalls(runId).map((c) => ({ tool_name: c.tool_name, args: c.args })) });
   }
   store.finishBatch(batchId);
-  const score = await scoreBatch(runs, TASK, { judge: unavailableJudge() });
+  const score = await scoreBatch(runs, TASK, { judge: unavailableJudge("no judge in this test") });
   store.recordScore({
     task_id: taskId,
     evaluation_batch_id: batchId,
@@ -269,6 +269,39 @@ describe("dashboard data layer", () => {
       assert.deepEqual(c.prompt_diff!.filter((l) => l.op !== "match").map((l) => [l.op, l.after]), [["insert", "Check refund history before refunding."]]);
       assert.ok(c.tools.every((t) => t.kind === "unchanged"));
       assert.equal(c.reordered, false);
+    });
+  });
+
+  test("trend: a fingerprint formula change (v1 -> v2, same deployment) is not drawn as a deploy; a real change still is", async () => {
+    const froot = path.join(dir, "formula-store");
+    const store = openTraceStore({ root: froot });
+    const comps = { model_name: "claude-sonnet-4-5", model_version: "claude-sonnet-4-5-20250929", system_prompt: PROMPT_A, tool_schema: TOOLS };
+    const v1 = computeDeploymentFingerprintV1(comps);
+    const v2 = computeDeploymentFingerprint({ ...comps, provider: "anthropic", endpoint: "api.anthropic.com" });
+    const moved = computeDeploymentFingerprint({ ...comps, provider: "bedrock", endpoint: "bedrock-runtime.us-east-1.amazonaws.com" });
+    for (const fp of [v1, v2, moved]) store.recordDeploymentFingerprint(fp);
+    const ids = [
+      await writeBatch(store, ["decline", "decline"], [v1.hash, v1.hash]),
+      await writeBatch(store, ["decline", "decline"], [v2.hash, v2.hash]),
+      await writeBatch(store, ["decline", "decline"], [v2.hash, moved.hash]),
+    ];
+    store.close();
+    withStore(froot, (s) => {
+      if (s.kind !== "ok") return assert.fail(s.kind);
+      const t = getTrend(s.store, TASK.name, specs)!;
+      assert.deepEqual(t.points.map((p) => p.batch.id), ids);
+      const formula = t.points[1]!.changes;
+      assert.equal(formula.length, 1);
+      assert.equal(formula[0]!.formula_only, true);
+      assert.deepEqual(formula[0]!.components, []);
+      assert.deepEqual(formula[0]!.formula_versions, [1, 2]);
+      const real = t.points[2]!.changes;
+      assert.deepEqual(real.map((c) => [c.components, c.formula_only, c.within_batch]), [[["provider", "endpoint"], false, true]]);
+      assert.equal(t.points[2]!.deployment.mixed, true);
+      const cmp = compareFingerprints(s.store, v1.hash, v2.hash)!;
+      assert.equal(cmp.formula_only, true);
+      assert.deepEqual(cmp.changed, []);
+      assert.deepEqual(cmp.unrecorded, ["provider", "endpoint"]);
     });
   });
 });

@@ -22,11 +22,24 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { POST_MIGRATION_SQL, REQUIRED_TABLES, RUNS_MIGRATIONS, SCHEMA_SQL, TABLE_MIGRATIONS } from "./schema.js";
-import { changedComponents, isScriptedStandIn, type DeploymentFingerprint, type FingerprintComponent } from "./fingerprint.js";
+import {
+  compareDeployments,
+  FINGERPRINT_COMPONENTS,
+  isScriptedStandIn,
+  type DeploymentFingerprint,
+  type FingerprintComponent,
+} from "./fingerprint.js";
 
 export { SCHEMA_SQL };
 export {
   computeDeploymentFingerprint,
+  computeDeploymentFingerprintV1,
+  compareDeployments,
+  normalizeEndpoint,
+  FINGERPRINT_COMPONENTS,
+  FINGERPRINT_VERSION,
+  FINGERPRINT_FORMAT_V1,
+  type DeploymentComparison,
   changedComponents,
   canonicalJson,
   isScriptedStandIn,
@@ -275,6 +288,9 @@ export interface BatchFingerprintCount {
 export interface BatchDeploymentFingerprint {
   hash: string;
   runs: number;
+  fingerprint_version: number | null;
+  provider: string | null;
+  endpoint: string | null;
   model_name: string | null;
   model_version: string | null;
   /** The reported model is the scripted stand-in: SYNTHETIC runs, not a model. */
@@ -287,10 +303,18 @@ export interface BatchDeployment {
   fingerprints: BatchDeploymentFingerprint[];
   /** Matrix runs with no fingerprint: no model response arrived, or the run predates fingerprinting. */
   runs_without_fingerprint: number;
-  /** More than one distinct fingerprint: the deployment changed during the batch. */
+  /**
+   * The deployment changed during the batch: some recorded component differs between two
+   * of its fingerprints. Two hashes that differ only because they were computed with
+   * different fingerprint formulas are NOT mixed (see formula_only).
+   */
   mixed: boolean;
   /** Components that differ between any fingerprint and the most common one. */
   changed: FingerprintComponent[];
+  /** Fingerprint formula versions present, ascending. */
+  formula_versions: number[];
+  /** More than one hash, but only because of a formula change: the same deployment. */
+  formula_only: boolean;
 }
 
 function toJson(value: unknown): string {
@@ -759,10 +783,10 @@ export class TraceStore {
   recordDeploymentFingerprint(fp: DeploymentFingerprint): string {
     this.db
       .prepare(
-        `insert into deployment_fingerprints (hash, model_name, model_version, system_prompt_hash, tool_schema_hash,
-           system_prompt, tool_schema_json, first_seen_at)
-         values (@hash, @model_name, @model_version, @system_prompt_hash, @tool_schema_hash,
-           @system_prompt, @tool_schema_json, @first_seen_at)
+        `insert into deployment_fingerprints (hash, fingerprint_version, provider, endpoint, model_name, model_version,
+           system_prompt_hash, tool_schema_hash, system_prompt, tool_schema_json, first_seen_at)
+         values (@hash, @fingerprint_version, @provider, @endpoint, @model_name, @model_version,
+           @system_prompt_hash, @tool_schema_hash, @system_prompt, @tool_schema_json, @first_seen_at)
          on conflict (hash) do nothing`
       )
       .run({ ...fp, first_seen_at: new Date().toISOString() });
@@ -818,19 +842,26 @@ export class TraceStore {
       fingerprints.push({
         hash: c.hash,
         runs: c.runs,
+        fingerprint_version: row?.fingerprint_version ?? null,
+        provider: row?.provider ?? null,
+        endpoint: row?.endpoint ?? null,
         model_name: row?.model_name ?? null,
         model_version: row?.model_version ?? null,
         synthetic: isScriptedStandIn(row?.model_version),
       });
     }
     const changed = new Set<FingerprintComponent>();
-    for (const other of rows.slice(1)) for (const c of changedComponents(rows[0]!, other)) changed.add(c);
-    const order: FingerprintComponent[] = ["model_name", "model_version", "system_prompt", "tool_schema"];
+    for (const other of rows.slice(1)) for (const c of compareDeployments(rows[0]!, other).changed) changed.add(c);
+    // A fingerprint row that is missing cannot be compared: counted as a change, not waved through.
+    const missingRow = rows.length < fingerprints.length;
+    const mixed = fingerprints.length > 1 && (changed.size > 0 || missingRow);
     return {
       fingerprints,
       runs_without_fingerprint: without,
-      mixed: fingerprints.length > 1,
-      changed: order.filter((c) => changed.has(c)),
+      mixed,
+      changed: FINGERPRINT_COMPONENTS.filter((c) => changed.has(c)),
+      formula_versions: [...new Set(rows.map((r) => r.fingerprint_version ?? 1))].sort((a, b) => a - b),
+      formula_only: fingerprints.length > 1 && !mixed,
     };
   }
 

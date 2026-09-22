@@ -44,6 +44,8 @@
  *     holds the hash; it carries no foreign key because SQLite cannot add one to an
  *     existing column, and runs created before fingerprinting keep null (unknown), which
  *     is the truth about them. See src/fingerprint.ts for how the hash is computed.
+ *     fingerprint_version says which hashing formula produced a row's hash; provider and
+ *     endpoint (host only) are v2 components, null on v1 rows.
  *
  *   - adversarial mode (ARCHITECTURE.md section 4, "injection propagation"): batches.kind
  *     separates an adversarial batch from a consistency batch, so the two never mix in a
@@ -137,6 +139,9 @@ create table if not exists scores (
 
 create table if not exists deployment_fingerprints (
   hash               text primary key,
+  fingerprint_version integer not null default 1,
+  provider           text,
+  endpoint           text,
   model_name         text not null,
   model_version      text not null,
   system_prompt_hash text,
@@ -178,6 +183,15 @@ export const TABLE_MIGRATIONS: Array<{ table: string; column: string; ddl: strin
   { table: "batches", column: "adversarial_payload", ddl: "alter table batches add column adversarial_payload text" },
   { table: "tool_calls", column: "is_injected", ddl: "alter table tool_calls add column is_injected integer not null default 0" },
   { table: "tool_calls", column: "injection_payload_id", ddl: "alter table tool_calls add column injection_payload_id text" },
+  // Fingerprint formula v2 (provider + endpoint host as components). Existing rows are v1
+  // fingerprints: they keep their hash, and provider/endpoint stay null (not recorded).
+  {
+    table: "deployment_fingerprints",
+    column: "fingerprint_version",
+    ddl: "alter table deployment_fingerprints add column fingerprint_version integer not null default 1",
+  },
+  { table: "deployment_fingerprints", column: "provider", ddl: "alter table deployment_fingerprints add column provider text" },
+  { table: "deployment_fingerprints", column: "endpoint", ddl: "alter table deployment_fingerprints add column endpoint text" },
 ];
 
 /** Indexes over migrated columns; created only after the migrations have run. */

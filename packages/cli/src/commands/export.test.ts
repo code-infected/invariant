@@ -18,6 +18,7 @@ import { parseConfig } from "../lib/config.js";
 import { scoreStoredBatch } from "./score.js";
 import { writeCodeCleanupBatch } from "./code-cleanup-fixture.js";
 import { runExport } from "./export.js";
+import { clearConfiguredCredentials } from "../lib/models.js";
 
 class KeepSpans extends InMemorySpanExporter {
   override shutdown(): Promise<void> {
@@ -29,11 +30,10 @@ describe("invariant export on a SYNTHETIC batch (scripted stand-in, not a live m
   let root: string;
   let storeRoot: string;
   let batchId: string;
-  let savedKey: string | undefined;
+  let restoreCredentials: () => void = () => undefined;
 
   before(async () => {
-    savedKey = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
+    restoreCredentials = clearConfiguredCredentials(loadConfig());
     root = fs.mkdtempSync(path.join(os.tmpdir(), "invariant-export-test-"));
     storeRoot = path.join(root, ".invariant");
     const store = openTraceStore({ root: storeRoot });
@@ -46,7 +46,7 @@ describe("invariant export on a SYNTHETIC batch (scripted stand-in, not a live m
     }
   });
   after(() => {
-    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+    restoreCredentials();
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
 

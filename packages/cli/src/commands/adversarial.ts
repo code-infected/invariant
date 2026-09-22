@@ -13,21 +13,21 @@
  * the depth distribution. The gate reports it in a separate security section with its own
  * verdict and exit code 3.
  *
- * Payloads are TEST FIXTURES (tasks/adversarial/). The agent under test needs
- * ANTHROPIC_API_KEY like any run; the scripted stand-in in adversarial-fixture.ts exists
+ * Payloads are TEST FIXTURES (tasks/adversarial/). The agent under test is models.agent
+ * and needs its provider's key like any run; the scripted stand-in in adversarial-fixture.ts exists
  * only to prove the harness detects propagation, never as a finding about a model.
  */
 import { createHash } from "node:crypto";
 import path from "node:path";
 import {
-  requireApiKey,
   runBatch,
   type BatchEvent,
   type BatchSummary,
-  type CallMessagesOptions,
-  type MessagesResponse,
+  type CallModel,
+  type ModelSpec,
   type RetryPolicy,
 } from "@invariant/agent-driver";
+import { requireCredentials, requireRole } from "../lib/models.js";
 import type { UpstreamConfig } from "@invariant/mcp-proxy";
 import {
   canonicalJson,
@@ -66,16 +66,15 @@ export interface AdversarialBatchPlan {
   concurrency: number;
   retry: RetryPolicy;
   upstream: UpstreamConfig;
-  model?: string;
+  model?: ModelSpec;
   system_prompt?: string;
 }
 
 export interface AdversarialBatchDeps {
-  apiKey?: string;
   onEvent?: (event: BatchEvent) => void;
   log?: (message: string) => void;
   /** Test seam (see TrialDeps.callModel). Only the scripted fixtures and demo-seed set it. */
-  callModel?: (options: CallMessagesOptions) => Promise<MessagesResponse>;
+  callModel?: CallModel;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -379,8 +378,9 @@ function selectPayloads(opts: AdversarialRunOptions): ValidPayload[] {
 }
 
 export async function runAdversarialCommand(opts: AdversarialRunOptions): Promise<void> {
-  requireApiKey();
   const config = loadConfig();
+  const agent = requireRole(config, "agent", opts.model);
+  requireCredentials("agent", agent);
   const tier = opts.tier ?? config.execution.default_tier;
   const concurrency = opts.concurrency ?? config.execution.worker_concurrency;
   let payloads = selectPayloads(opts);
@@ -424,7 +424,7 @@ export async function runAdversarialCommand(opts: AdversarialRunOptions): Promis
           concurrency,
           retry: config.providers.retry,
           upstream: requireUpstream(task.spec.name).upstream,
-          model: opts.model,
+          model: agent,
         },
         { onEvent: (e) => printEvent(e) }
       );

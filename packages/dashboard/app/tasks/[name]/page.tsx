@@ -13,6 +13,8 @@ import { SecurityTable } from "../../../components/security";
 export const dynamic = "force-dynamic";
 
 const COMPONENT_SHORT: Record<FingerprintComponent, string> = {
+  provider: "provider",
+  endpoint: "endpoint",
   model_name: "model",
   model_version: "model version",
   system_prompt: "system prompt",
@@ -53,14 +55,18 @@ function TrendChart({ trend }: { trend: Trend }) {
       <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Axis scores across ${pts.length} batches of ${trend.task.name}`}>
         {changes.map(({ pt, c }, k) => {
           const cx = c.within_batch ? x(pt.index) : x(pt.index) - step / 2;
-          const text = `Δ ${c.components.map((x) => COMPONENT_SHORT[x]).join(" + ") || "fingerprint"}${c.within_batch ? " (mid-batch)" : ""}`;
+          // A formula-only change (same deployment, new hashing formula) is drawn muted and
+          // labelled as such: it must not read as a deploy.
+          const text = c.formula_only
+            ? `fingerprint formula${c.formula_versions ? ` v${c.formula_versions[0]}→v${c.formula_versions[1]}` : ""} (same deployment)`
+            : `Δ ${c.components.map((x) => COMPONENT_SHORT[x]).join(" + ") || "fingerprint"}${c.within_batch ? " (mid-batch)" : ""}`;
           return (
             <g key={k}>
-              <line className="fpmark" x1={cx} x2={cx} y1={TOP - 12} y2={panelTop(PANELS.length) - GAP + 2} />
-              <text className="fplbl" x={cx + 4} y={TOP - 16 + (k % 2) * -0} textAnchor="start">
+              <line className={c.formula_only ? "fpmark fpmark-formula" : "fpmark"} x1={cx} x2={cx} y1={TOP - 12} y2={panelTop(PANELS.length) - GAP + 2} />
+              <text className={c.formula_only ? "fplbl fplbl-formula" : "fplbl"} x={cx + 4} y={TOP - 16 + (k % 2) * -0} textAnchor="start">
                 {text}
               </text>
-              <title>{`${short(c.from)} → ${short(c.to)}: ${c.components.join(", ")}`}</title>
+              <title>{`${short(c.from)} → ${short(c.to)}: ${c.formula_only ? "formula change only, no recorded component differs" : c.components.join(", ")}`}</title>
             </g>
           );
         })}
@@ -121,6 +127,7 @@ function TrendChart({ trend }: { trend: Trend }) {
         <span>x: batches in order (label: # and dominant fingerprint)</span>
         <span>– – threshold</span>
         <span style={{ color: "var(--warn)" }}>┆ Δ fingerprint change (component named)</span>
+        <span className="muted">┆ grey: fingerprint formula changed, same deployment</span>
         <span>hollow marker: no score</span>
       </div>
     </div>
@@ -133,7 +140,11 @@ function ChangeText({ pt }: { pt: TrendPoint }) {
     <div className="fp-list">
       {pt.changes.map((c, i) => (
         <a key={i} href={`/fingerprints?a=${c.from}&b=${c.to}`} className="small">
-          <span className="tag tag-warn">Δ {c.components.map((x) => COMPONENT_SHORT[x]).join(" + ")}</span>{" "}
+          {c.formula_only ? (
+            <span className="tag">formula{c.formula_versions ? ` v${c.formula_versions[0]}→v${c.formula_versions[1]}` : ""}, same deployment</span>
+          ) : (
+            <span className="tag tag-warn">Δ {c.components.map((x) => COMPONENT_SHORT[x]).join(" + ")}</span>
+          )}{" "}
           {c.within_batch ? "mid-batch" : "since previous"}: <span className="mono">{short(c.from, 8)} → {short(c.to, 8)}</span>
         </a>
       ))}
@@ -160,8 +171,9 @@ export default async function TaskTrendPage({ params }: { params: Promise<{ name
           <span className="muted">{trend.points.length} finished batch{trend.points.length === 1 ? "" : "es"}</span>
         </div>
         <p className="lede">
-          Axis scores per batch, plotted against deployment fingerprints: a vertical marker is a change of model, model
-          version, system prompt or tool schema, so a regression can be pinned to the deploy that introduced it.
+          Axis scores per batch, plotted against deployment fingerprints: a vertical marker is a change of provider,
+          endpoint, model, model version, system prompt or tool schema, so a regression can be pinned to the deploy that
+          introduced it. A grey marker is a change of fingerprint formula only (same deployment, hashed differently).
           {trend.thresholds && <> Thresholds from {trend.thresholds.source}.</>}
         </p>
         {trend.points.length === 0 ? (

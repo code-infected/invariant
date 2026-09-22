@@ -52,15 +52,19 @@ export {
   type Vote,
 } from "./outcome.js";
 export {
-  createAnthropicJudge,
+  createModelJudge,
+  createModelEmbedder,
   unavailableJudge,
-  missingJudgeKeyMessage,
   buildJudgePrompt,
   parseVote,
   majority,
-  DEFAULT_JUDGE_MODEL,
   JUDGE_SYSTEM_PROMPT,
-  type AnthropicJudgeOptions,
+  JUDGE_MAX_TOKENS,
+  JUDGE_KEY_PURPOSE,
+  JUDGE_KEY_CONSEQUENCE,
+  type ModelJudgeOptions,
+  type ModelJudge,
+  type JudgeState,
   type JudgeRetryPolicy,
 } from "./judge.js";
 export { scoreBatch, verdictFor, type BatchScore, type AxisReport, type Verdict, type BatchRunInput } from "./score-batch.js";

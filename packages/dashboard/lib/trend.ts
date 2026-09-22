@@ -1,6 +1,6 @@
 import type { GateVerdict } from "@invariant/scoring";
 import {
-  changedComponents,
+  compareDeployments,
   type BatchDeployment,
   type BatchRow,
   type FingerprintComponent,
@@ -13,9 +13,18 @@ import type { TaskSpecLite } from "./specs";
 export interface FingerprintChange {
   from: string;
   to: string;
+  /** Recorded components that differ. Empty for a formula-only change. */
   components: FingerprintComponent[];
   /** True when the change happened inside this batch (a mixed batch). */
   within_batch: boolean;
+  /**
+   * The hash changed only because the fingerprint formula did (e.g. v1 -> v2 added
+   * provider and endpoint): every component both fingerprints recorded is equal. Not a
+   * deployment change, and drawn and labelled as such.
+   */
+  formula_only: boolean;
+  /** [from, to] formula versions when they differ. */
+  formula_versions?: [number, number];
 }
 
 export interface TrendPoint {
@@ -42,10 +51,19 @@ export interface Trend {
   fingerprints: string[];
 }
 
-function components(store: TraceStore, from: string, to: string): FingerprintComponent[] {
+function change(store: TraceStore, from: string, to: string, withinBatch: boolean): FingerprintChange {
   const a = store.getDeploymentFingerprint(from);
   const b = store.getDeploymentFingerprint(to);
-  return a && b ? changedComponents(a, b) : [];
+  if (!a || !b) return { from, to, components: [], within_batch: withinBatch, formula_only: false };
+  const c = compareDeployments(a, b);
+  return {
+    from,
+    to,
+    components: c.changed,
+    within_batch: withinBatch,
+    formula_only: c.formula_only,
+    ...(c.formula_changed ? { formula_versions: [a.fingerprint_version ?? 1, b.fingerprint_version ?? 1] as [number, number] } : {}),
+  };
 }
 
 /** Every finished batch of a task, oldest first, with its latest stored score and fingerprints. */
@@ -66,11 +84,11 @@ export function getTrend(store: TraceStore, taskName: string, specs: TaskSpecLit
     const last = inOrder[inOrder.length - 1] ?? null;
     const changes: FingerprintChange[] = [];
     if (previous && first && previous !== first) {
-      changes.push({ from: previous, to: first, components: components(store, previous, first), within_batch: false });
+      changes.push(change(store, previous, first, false));
     }
     for (let i = 1; i < inOrder.length; i++) {
       if (inOrder[i] !== inOrder[i - 1]) {
-        changes.push({ from: inOrder[i - 1]!, to: inOrder[i]!, components: components(store, inOrder[i - 1]!, inOrder[i]!), within_batch: true });
+        changes.push(change(store, inOrder[i - 1]!, inOrder[i]!, true));
       }
     }
     for (const h of inOrder) if (!order.includes(h)) order.push(h);

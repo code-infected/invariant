@@ -23,7 +23,7 @@ import type { ScoringRun } from "./types.js";
  * help between clusters that really differ: every cross-cluster pair has to be judged to
  * be sure none of them links the clusters, so a 50/50 split of 80 runs with distinct
  * wording is ~1600 judged pairs x votes calls. That is the cost the pre-filter exists to
- * cut, and it is why the pre-filter not being wired to a real embedder yet matters.
+ * cut, which is why configuring models.embedder matters on a large tier.
  *
  * Also inherent to connected components: similarity chains. If A~B and B~C, A and C share
  * a cluster even if the judge would call A and C different. That is the decided formula;
@@ -53,11 +53,9 @@ export class JudgeUnavailableError extends Error {
 export interface OutcomeOptions {
   judge?: JudgeFn;
   /**
-   * TODO: no embedding provider is wired in yet. The Anthropic API this project already
-   * uses has no embeddings endpoint, and adding a second provider (and key) is a decision
-   * for later. Until then the CLI passes nothing here and every non-identical pair of
-   * answers goes to the judge. The band logic below is real and tested with hand-built
-   * vectors; it is simply not fed by a real model yet. It is never fed by a fake one.
+   * The embedding pre-filter. The CLI sets it only when invariant.config.yaml configures
+   * models.embedder (createModelEmbedder); otherwise every non-identical pair of answers
+   * goes to the judge, and the result says so. It is never fed by a fake embedder.
    */
   embed?: EmbedFn;
   prefilter?: { high: number; low: number };
@@ -210,7 +208,7 @@ export async function scoreOutcome(
     }
   }
   if (!options.embed) {
-    notes.push("embedding pre-filter not configured (no embedding provider wired in yet): every pair of non-identical answers went to the judge");
+    notes.push("embedding pre-filter not configured (no models.embedder in invariant.config.yaml): every pair of non-identical answers went to the judge");
   }
 
   for (const pair of band) {

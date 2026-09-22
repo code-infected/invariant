@@ -1,20 +1,24 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { openTraceStore, type BatchRow, type TraceStore } from "@invariant/trace-store";
+import { clientFor, parseModelRef, type ModelSpec } from "@invariant/providers";
 import {
   canonicalJson,
-  createAnthropicJudge,
-  DEFAULT_JUDGE_MODEL,
+  createModelEmbedder,
+  createModelJudge,
   scoreBatch,
   unavailableJudge,
   type BatchRunInput,
   type BatchScore,
   type EmbedFn,
   type JudgeFn,
+  type JudgeState,
   type ScoringTask,
   type Verdict,
 } from "@invariant/scoring";
 import { loadConfig } from "../lib/config.js";
+import { roleMissingKeyMessage, roleSpec } from "../lib/models.js";
+import { credentialStatus } from "@invariant/providers";
 import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { batchFingerprints, fingerprintLines, mixedFingerprintWarning, type BatchFingerprintSummary } from "../lib/fingerprints.js";
@@ -33,9 +37,11 @@ export interface ScoreDeps {
   /** Trace store directory; defaults to <repo>/.invariant. */
   storeRoot?: string;
   config?: InvariantConfig;
-  /** Overrides the judge built from ANTHROPIC_API_KEY. Test seam, like TrialDeps.callModel. */
+  /** --judge-model=provider:model: overrides models.judge (see lib/models.ts withOverride). */
+  judgeModel?: string;
+  /** Overrides the judge built from models.judge. Test seam, like TrialDeps.callModel. */
   judge?: JudgeFn;
-  /** Embedding pre-filter. Nothing in the CLI sets it yet: see OutcomeOptions.embed. */
+  /** Overrides the embedder built from models.embedder. Test seam. */
   embed?: EmbedFn;
   /** Where the report goes; defaults to stdout. */
   out?: (line: string) => void;
@@ -43,12 +49,21 @@ export interface ScoreDeps {
 }
 
 export interface JudgeSettings {
+  /** "provider:model" from models.judge (or --judge-model); "(none configured)" when there is none. */
   model: string;
-  temperature: number;
+  /**
+   * The temperature the judge ran at: the configured one, or "unsupported" when the
+   * provider refused the parameter and the judge ran without it (recorded, never hidden).
+   */
+  temperature: number | "unsupported";
+  /** judge.temperature as configured. */
+  temperature_requested: number;
   votes: number;
-  /** False when no ANTHROPIC_API_KEY was set (and no judge was injected). */
+  /** False when the judge's credentials are not set (and no judge was injected). */
   available: boolean;
   injected: boolean;
+  /** Model ids the judge's provider reported, once it has been called. */
+  reported_models?: string[];
 }
 
 export interface StoredScore {
@@ -120,22 +135,70 @@ export function resolveBatch(store: TraceStore, opts: Pick<ScoreOptions, "batch"
   return { batch, task };
 }
 
-export function buildJudge(config: InvariantConfig, deps: ScoreDeps): { judge: JudgeFn; settings: JudgeSettings } {
+export function buildJudge(
+  config: InvariantConfig,
+  deps: Pick<ScoreDeps, "judge" | "judgeModel">
+): { judge: JudgeFn; settings: JudgeSettings; spec: ModelSpec | null; state: JudgeState | null } {
+  const spec = roleSpec(config, "judge", deps.judgeModel);
   const settings = {
-    model: config.judge.model ?? DEFAULT_JUDGE_MODEL,
+    model: spec?.model ?? "(none configured)",
     temperature: config.judge.temperature,
+    temperature_requested: config.judge.temperature,
     votes: config.judge.votes,
   };
-  if (deps.judge) return { judge: deps.judge, settings: { ...settings, available: true, injected: true } };
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    // Not an error yet: if every answer in the batch is identical, no pair needs a judge.
-    return { judge: unavailableJudge(), settings: { ...settings, available: false, injected: false } };
+  if (deps.judge) return { judge: deps.judge, settings: { ...settings, available: true, injected: true }, spec, state: null };
+  // Not an error yet: if every answer in the batch is identical, no pair needs a judge.
+  if (!spec) {
+    const why =
+      "no judge model configured: set models.judge.model in invariant.config.yaml (or pass --judge-model=provider:model). " +
+      "The outcome axis needs an LLM judge, and there is no offline fallback.";
+    return { judge: unavailableJudge(why), settings: { ...settings, available: false, injected: false }, spec, state: null };
   }
-  return {
-    judge: createAnthropicJudge({ apiKey, ...settings, retry: config.providers.retry }),
-    settings: { ...settings, available: true, injected: false },
-  };
+  if (credentialStatus(spec).state === "missing") {
+    return { judge: unavailableJudge(roleMissingKeyMessage("judge", spec)), settings: { ...settings, available: false, injected: false }, spec, state: null };
+  }
+  const { judge, state } = createModelJudge({
+    client: clientFor(spec, { missing: (s) => roleMissingKeyMessage("judge", s) }),
+    temperature: config.judge.temperature,
+    votes: config.judge.votes,
+    retry: config.providers.retry,
+    ...(spec.params ? { params: spec.params } : {}),
+  });
+  return { judge, settings: { ...settings, available: true, injected: false }, spec, state };
+}
+
+/**
+ * The embedding pre-filter's embedder, when models.embedder is configured. A missing key
+ * is not swallowed: the embedder throws the missing-key message when first called, and the
+ * outcome axis is reported not computed, because the config asked for the pre-filter.
+ */
+export function buildEmbedder(config: InvariantConfig, deps: Pick<ScoreDeps, "embed">): { embed: EmbedFn | undefined; model: string | null } {
+  if (deps.embed) return { embed: deps.embed, model: "(injected)" };
+  const spec = roleSpec(config, "embedder");
+  if (!spec) return { embed: undefined, model: null };
+  if (credentialStatus(spec).state === "missing") {
+    const message = roleMissingKeyMessage("embedder", spec);
+    return {
+      embed: async () => {
+        throw new Error(message);
+      },
+      model: spec.model,
+    };
+  }
+  return { embed: createModelEmbedder(clientFor(spec)), model: spec.model };
+}
+
+/**
+ * The judge part of the scoring key. For the default provider with no endpoint or params
+ * override it is exactly what it was before judges became provider-neutral (the bare model
+ * id), so a score stored then is still reused now when nothing changed.
+ */
+function judgeKey(judge: JudgeSettings, spec: ModelSpec | null): Record<string, unknown> {
+  const base = { temperature: judge.temperature_requested, votes: judge.votes, injected: judge.injected };
+  if (!spec || judge.injected) return { model: judge.model, ...base };
+  const { provider, model } = parseModelRef(spec.model);
+  if (provider === "anthropic" && !spec.base_url && !spec.params && !spec.api_key_env) return { model, ...base };
+  return { model: spec.model, base_url: spec.base_url ?? null, params: spec.params ?? null, ...base };
 }
 
 /**
@@ -145,17 +208,33 @@ export function buildJudge(config: InvariantConfig, deps: ScoreDeps): { judge: J
  * re-applies the current thresholds to a stored score. Stored with every score so the
  * gate can reuse a score only when it would compute the same numbers again.
  */
-export function scoringKey(task: LoadedTask, judge: JudgeSettings, config: InvariantConfig, deps: Pick<ScoreDeps, "embed">): string {
+export function scoringKey(
+  task: LoadedTask,
+  judge: JudgeSettings,
+  config: InvariantConfig,
+  deps: Pick<ScoreDeps, "embed" | "judgeModel">
+): string {
+  const spec = judge.injected ? null : roleSpec(config, "judge", deps.judgeModel);
+  const embedder = buildEmbedderModel(config, deps);
   const inputs = {
     success_rubric: task.spec.success_rubric,
     dangerous_tools: task.spec.tools.dangerous.map((d) => d.name),
     volatile_fields: task.spec.volatile_fields,
-    judge: { model: judge.model, temperature: judge.temperature, votes: judge.votes, injected: judge.injected },
-    prefilter: deps.embed
-      ? { high: config.judge.embedding_prefilter_threshold_high, low: config.judge.embedding_prefilter_threshold_low }
+    judge: judgeKey(judge, spec),
+    prefilter: embedder
+      ? {
+          high: config.judge.embedding_prefilter_threshold_high,
+          low: config.judge.embedding_prefilter_threshold_low,
+          ...(embedder === "(injected)" ? {} : { embedder }),
+        }
       : null,
   };
   return createHash("sha256").update(canonicalJson(inputs)).digest("hex");
+}
+
+function buildEmbedderModel(config: InvariantConfig, deps: Pick<ScoreDeps, "embed">): string | null {
+  if (deps.embed) return "(injected)";
+  return roleSpec(config, "embedder")?.model ?? null;
 }
 
 /** Load a batch's matrix from the store, score it, and persist the scores. */
@@ -178,15 +257,22 @@ export async function scoreStoredBatch(
     };
   });
 
-  const { judge, settings } = buildJudge(config, deps);
+  const { judge, settings, state } = buildJudge(config, deps);
+  const embedder = buildEmbedder(config, deps);
   const score = await scoreBatch(runs, scoringTask(task), {
     judge,
-    embed: deps.embed,
+    embed: embedder.embed,
     prefilter: {
       high: config.judge.embedding_prefilter_threshold_high,
       low: config.judge.embedding_prefilter_threshold_low,
     },
   });
+
+  if (state) {
+    // What the judge actually did: a temperature the provider refused is recorded as such.
+    settings.temperature = state.temperature;
+    if (state.reported_models.length > 0) settings.reported_models = state.reported_models;
+  }
 
   const scoreId = store.recordScore({
     task_id: batch.task_id,
@@ -198,7 +284,15 @@ export async function scoreStoredBatch(
     details: {
       spec_source: `tasks/${task.spec.name}.yaml`,
       scoring_key: scoringKey(task, settings, config, deps),
-      judge: { model: settings.model, temperature: settings.temperature, votes: settings.votes, injected: settings.injected },
+      judge: {
+        model: settings.model,
+        temperature: settings.temperature,
+        temperature_requested: settings.temperature_requested,
+        votes: settings.votes,
+        injected: settings.injected,
+        ...(settings.reported_models ? { reported_models: settings.reported_models } : {}),
+      },
+      embedder: embedder.model,
       labels: Object.fromEntries(labels),
       ...score,
     },
@@ -326,7 +420,7 @@ export function renderReport(stored: StoredScore): string[] {
       `  outcome: ${oc.clusters.length} cluster(s) from ${oc.nodes.length} distinct answer(s); ` +
         `${oc.judged_pairs} pair(s) judged` +
         (oc.judged_pairs > 0
-          ? ` by ${judge.injected ? "an injected judge" : judge.model} (temperature ${judge.temperature}, majority of ${judge.votes})`
+          ? ` by ${judge.injected ? "an injected judge" : judge.model} (${judgeTemperatureText(judge)}, majority of ${judge.votes})`
           : "") +
         `; embedding pre-filter ${oc.prefilter === "embedding" ? "on" : "off"}`
     );
@@ -342,6 +436,13 @@ export function renderReport(stored: StoredScore): string[] {
     "  Pass/fail is per axis against tasks/" + s.task + ".yaml thresholds. Informational: `invariant gate` turns it into an exit code."
   );
   return lines;
+}
+
+/** "temperature 0", or the recorded fact that the provider refused it. */
+export function judgeTemperatureText(judge: Pick<JudgeSettings, "temperature" | "temperature_requested">): string {
+  return judge.temperature === "unsupported"
+    ? `temperature UNSUPPORTED by this model: judged at the provider's default, not the requested ${judge.temperature_requested}`
+    : `temperature ${judge.temperature}`;
 }
 
 function scoreJson(stored: StoredScore): unknown {

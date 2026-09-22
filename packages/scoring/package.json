@@ -12,6 +12,9 @@
     "build": "tsc -p tsconfig.json",
     "test": "node --test \"dist/**/*.test.js\""
   },
+  "dependencies": {
+    "@invariant/providers": "*"
+  },
   "devDependencies": {
     "@types/node": "^22.5.0",
     "typescript": "^5.5.4"

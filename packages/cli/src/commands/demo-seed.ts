@@ -11,8 +11,9 @@
  * data. No batch here is a finding about any model.
  *
  * It never writes to the default store (.invariant/ at the repo root), refuses a path
- * that already holds a trace.db, and removes ANTHROPIC_API_KEY from its own environment
- * while it runs, so neither the agent nor the outcome judge can reach a real model.
+ * that already holds a trace.db, and removes every credential the configured model roles
+ * read (lib/models.ts) from its own environment while it runs, so neither the agent nor
+ * the outcome judge can reach a real model.
  *
  * The story it tells, all on refund-duplicate-check, variants v1-v3 x 3 trials:
  *   1. baseline          fingerprint A: 5 of 9 cells refund an already-refunded order.
@@ -37,13 +38,15 @@ import path from "node:path";
 import { createRequire } from "node:module";
 import {
   DEFAULT_SYSTEM_PROMPT,
-  ProviderInfraError,
+  ProviderError,
+  SCRIPTED_MODEL,
+  scriptedResponse,
   runBatch,
-  type CallMessagesOptions,
-  type MessagesResponse,
+  type CallModel,
 } from "@invariant/agent-driver";
 import { openTraceStore, type TraceStore } from "@invariant/trace-store";
 import { loadConfig } from "../lib/config.js";
+import { clearConfiguredCredentials } from "../lib/models.js";
 import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR } from "../lib/paths.js";
 import { syncTask } from "./run.js";
@@ -65,8 +68,12 @@ export const DEMO_TASK = "refund-duplicate-check";
 export const DEMO_VARIANTS = ["v1", "v2", "v3"];
 export const DEMO_TRIALS = 3;
 
-/** Requested model id for every demo run. Not a real model, and named so nobody reads it as one. */
-export const DEMO_MODEL = "scripted-stand-in";
+/**
+ * Requested model id for every demo run (recorded with provider "scripted": TrialPlan.model
+ * is left unset, see SCRIPTED_MODEL in @invariant/agent-driver). Not a real model, and
+ * named so nobody reads it as one.
+ */
+export const DEMO_MODEL = SCRIPTED_MODEL;
 const VERSION_A = "scripted-stand-in (NOT a model)";
 const VERSION_B = "scripted-stand-in-2 (NOT a model)";
 const FIXED_PROMPT = DEFAULT_SYSTEM_PROMPT + " Before issuing any refund, check the order's refund history.";
@@ -173,7 +180,7 @@ export const DEMO_SCENARIOS: Scenario[] = [
 function scenarioAgent(
   scenario: Scenario,
   prompts: Map<string, string>
-): (options: CallMessagesOptions) => Promise<MessagesResponse> {
+): CallModel {
   const queue: Array<{ variant: string; attempt: Attempt }> = [];
   let index = 0;
   for (let t = 1; t <= DEMO_TRIALS; t++) {
@@ -189,24 +196,23 @@ function scenarioAgent(
       const next = queue[taken++];
       if (!next) throw new Error(`demo-seed: scenario "${scenario.name}" has no attempt #${taken}`);
       const expected = prompts.get(next.variant);
-      if (options.messages[0]!.content !== expected) {
+      const first = options.messages[0]!;
+      if (first.role !== "user" || first.content !== expected) {
         throw new Error(`demo-seed: scenario "${scenario.name}" attempt #${taken} expected variant ${next.variant}'s prompt`);
       }
       current = { ...next, steps: "behaviour" in next.attempt ? steps(next.attempt.behaviour) : [] };
       if ("infra" in next.attempt) {
-        throw new ProviderInfraError("SYNTHETIC demo: scripted provider 503 (no request was made)", 503);
+        throw new ProviderError("SYNTHETIC demo: scripted provider 503 (no request was made)", { provider: "scripted", kind: "infra", status: 503 });
       }
     }
     const n = (options.messages.length - 1) / 2;
     const step = current?.steps[n];
     if (!current || !step || !("behaviour" in current.attempt)) throw new Error(`demo-seed: no scripted step ${n}`);
-    return {
-      id: `scripted-${n}`,
+    return scriptedResponse({
       model: current.attempt.version,
-      stop_reason: "tool_use",
-      content: [{ type: "tool_use", id: `tu_${n}`, name: step.name, input: step.input }],
+      tool_calls: [{ id: `tu_${n}`, name: step.name, input: step.input }],
       usage: { input_tokens: 0, output_tokens: 0 },
-    };
+    });
   };
 }
 
@@ -237,9 +243,8 @@ export function assertDemoStorePath(storeRoot: string): string {
 export async function runDemoSeed(opts: DemoSeedOptions): Promise<DemoSeedResult> {
   const out = opts.out ?? ((line: string) => console.log(line));
   const root = assertDemoStorePath(opts.store);
-  const savedKey = process.env.ANTHROPIC_API_KEY;
-  delete process.env.ANTHROPIC_API_KEY;
   const config = loadConfig();
+  const restoreCredentials = clearConfiguredCredentials(config);
   const task = loadValidTask(DEMO_TASK);
   const store = openTraceStore({ root });
   const batches: DemoSeedResult["batches"] = [];
@@ -274,7 +279,7 @@ export async function runDemoSeed(opts: DemoSeedOptions): Promise<DemoSeedResult
     }
   } finally {
     store.close();
-    if (savedKey !== undefined) process.env.ANTHROPIC_API_KEY = savedKey;
+    restoreCredentials();
   }
   return { store: root, batches };
 }
@@ -296,7 +301,6 @@ async function writeScenarioBatch(store: TraceStore, task: LoadedTask, scenario:
       variants_requested: variants.length,
       trials: DEMO_TRIALS,
       trial: {
-        model: DEMO_MODEL,
         system_prompt: scenario.system_prompt,
         dangerous_tools: task.spec.tools.dangerous,
         upstream: { command: process.execPath, args: [require_.resolve("@invariant/toy-tool-server/bin")] },

@@ -279,7 +279,13 @@ export function ingestTraceFiles(opts: Omit<IngestOptions, "json">, deps: Pick<I
         if (call.is_sandboxed) sandboxed++;
       }
       if (trace.fingerprint !== null) {
-        const fp = computeDeploymentFingerprint(trace.fingerprint);
+        // provider/endpoint are optional in the file: an older adapter that does not send them
+        // gets a fingerprint with them "not recorded" (null), never a guessed value.
+        const fp = computeDeploymentFingerprint({
+          ...trace.fingerprint,
+          provider: trace.fingerprint.provider ?? null,
+          endpoint: trace.fingerprint.endpoint ?? null,
+        });
         store.recordDeploymentFingerprint(fp);
         store.setRunFingerprint(runId, fp.hash);
         if (!hashes.includes(fp.hash)) hashes.push(fp.hash);

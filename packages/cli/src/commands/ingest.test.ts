@@ -61,6 +61,36 @@ describe("invariant ingest", () => {
     assert.equal(fs.existsSync(path.join(storeRoot, "trace.db")), false);
   }
 
+  test("fingerprint provider and endpoint (optional in the file) reach the stored fingerprint; files without them stay valid", () => {
+    const withProvider = variantDir("with-provider", "", (trace) => {
+      if (trace.fingerprint) {
+        trace.fingerprint.provider = "openai";
+        trace.fingerprint.endpoint = "api.openai.com";
+      }
+    });
+    const roots = { with: path.join(tmp, "store-with-provider"), without: path.join(tmp, "store-without-provider") };
+    const a = ingestTraceFiles({ task: TASK, tier: "smoke", paths: [withProvider] }, { storeRoot: roots.with });
+    const b = ingestTraceFiles({ task: TASK, tier: "smoke", paths: [FIXTURES] }, { storeRoot: roots.without });
+    for (const [root, result, provider, endpoint] of [
+      [roots.with, a, "openai", "api.openai.com"],
+      [roots.without, b, null, null],
+    ] as const) {
+      const store = openTraceStore({ root });
+      try {
+        assert.ok(result.fingerprints.length >= 1);
+        for (const hash of result.fingerprints) {
+          const fp = store.getDeploymentFingerprint(hash)!;
+          assert.equal(fp.fingerprint_version, 2);
+          assert.equal(fp.provider, provider);
+          assert.equal(fp.endpoint, endpoint);
+        }
+      } finally {
+        store.close();
+      }
+    }
+    assert.notDeepEqual(a.fingerprints, b.fingerprints, "provider and endpoint are hashed");
+  });
+
   test("a valid adapter batch becomes one finished batch that the unchanged scorer scores", async () => {
     const storeRoot = path.join(tmp, "store-valid");
     const lines: string[] = [];
