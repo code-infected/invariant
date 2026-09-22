@@ -13,8 +13,9 @@ Status mapping, the same categories as the MCP driver (packages/agent-driver):
   timeout      max_wall_clock_seconds elapsed (wall_clock_timeout), or the graph hit its
                recursion limit, 2 x max_turns + 1 supersteps (max_turns).
   infra_error  the graph raised. error.kind: provider for a transient provider failure
-               (429, 5xx, timeouts, connection errors), provider_rejected for any other
-               4xx, harness for everything else. There is no retry: the cell is recorded
+               (408/429/5xx, throttling, timeouts, connection errors), provider_rejected
+               for any other 4xx (bad key, unknown model, invalid request), harness for
+               everything else. See classify_error for how each provider's exceptions map. There is no retry: the cell is recorded
                as infra_error and scoring excludes it, as it excludes any run without a
                behavioural answer.
 """
@@ -40,16 +41,10 @@ from .sandbox import sandbox_tools
 from .spec import Selection, Task
 from .trace_file import FORMAT, trace_filename, write_trace
 
-DEFAULT_MODEL = "claude-sonnet-4-5"  # packages/agent-driver DEFAULT_MODEL
+# packages/agent-driver DEFAULT_MODEL. A default, not a requirement: --model picks any provider.
+DEFAULT_MODEL = "anthropic:claude-sonnet-4-5"
 DEFAULT_MAX_TURNS = 12
 DEFAULT_REPLY_TOOL = "reply_to_user"
-
-MISSING_KEY_MESSAGE = (
-    "ANTHROPIC_API_KEY is not set. Running a trial drives the agent under test through "
-    "the real Anthropic API and needs a real key, there is no offline fallback because "
-    "a faked agent response would produce a trace that measures nothing. Set the key "
-    "and re-run (or pass --model-factory to drive the graph with a model of your own)."
-)
 
 
 @dataclass(frozen=True)
@@ -87,19 +82,6 @@ def tool_source(obj: Any) -> ToolSource:
     return lambda: tools
 
 
-def anthropic_model_factory(model_id: str, api_key: str | None) -> ModelFactory:
-    if not api_key:
-        raise RuntimeError(MISSING_KEY_MESSAGE)
-    from langchain_anthropic import ChatAnthropic
-
-    def factory(_cell: CellInfo) -> Any:
-        # max_retries=0: a provider failure must surface as this cell's infra_error, not be
-        # retried invisibly inside one recorded run.
-        return ChatAnthropic(model=model_id, api_key=api_key, max_retries=0)
-
-    return factory
-
-
 def tool_schema(tools: Iterable[BaseTool]) -> list[dict[str, Any]]:
     """The tools as offered to the agent: name, description, input JSON schema, in order."""
     out = []
@@ -109,29 +91,116 @@ def tool_schema(tools: Iterable[BaseTool]) -> list[dict[str, Any]]:
     return out
 
 
-def classify_error(err: BaseException) -> dict[str, Any]:
-    status = getattr(err, "status_code", None)
-    if status is None:
-        status = getattr(getattr(err, "response", None), "status_code", None)
-    kind = "harness"
-    try:
-        import anthropic
+# Error classification. Each provider SDK surfaces failures differently; these are the
+# shapes of the pinned versions (pyproject.toml):
+#   openai / anthropic   APIStatusError subclasses with .status_code; APIConnectionError
+#                        (and its APITimeoutError subclass) for transport failures
+#   google-genai         errors.APIError with .code (HTTP status) and .status ("RESOURCE_EXHAUSTED");
+#                        langchain-google-genai re-raises them as Google*Error, chained with `from`
+#   botocore (Bedrock)   ClientError with response Error.Code ("ThrottlingException") and
+#                        ResponseMetadata.HTTPStatusCode; EndpointConnectionError and
+#                        ConnectTimeoutError/ReadTimeoutError for transport failures
+#   langchain-core       ModelError subclasses (ModelRateLimitError, ModelAPIError, ...)
+#                        that langchain-openai/-anthropic/-google-genai also raise
+# The whole exception chain (__cause__/__context__) is searched, so a wrapped provider
+# error is classified by what the provider said.
 
-        if isinstance(err, (anthropic.APITimeoutError, anthropic.APIConnectionError)):
+TRANSIENT_STATUSES = {"RESOURCE_EXHAUSTED", "UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED"}  # google.rpc codes
+TRANSIENT_AWS_CODES = {
+    "ThrottlingException",
+    "TooManyRequestsException",
+    "ServiceUnavailableException",
+    "InternalServerException",
+    "ModelNotReadyException",
+    "ModelTimeoutException",
+}
+TRANSIENT_ERROR_NAMES = {
+    # openai, anthropic (connection failures and timeouts)
+    "APIConnectionError",
+    "APITimeoutError",
+    # botocore
+    "EndpointConnectionError",
+    "ConnectionClosedError",
+    "ConnectTimeoutError",
+    "ReadTimeoutError",
+    # httpx / httpx2 (google-genai, and the openai/anthropic transports)
+    "TransportError",
+    "TimeoutException",
+    "NetworkError",
+    # langchain-core (the classes it marks is_retryable)
+    "ModelConnectionError",
+    "ModelTimeoutError",
+    "ModelRateLimitError",
+    "ModelAPIError",
+}
+REJECTED_ERROR_NAMES = {
+    "ModelAuthenticationError",
+    "ModelPermissionDeniedError",
+    "ModelInvalidRequestError",
+    "ModelNotFoundError",
+}
+
+
+def _chain(err: BaseException) -> list[BaseException]:
+    out: list[BaseException] = []
+    cur: BaseException | None = err
+    while cur is not None and cur not in out and len(out) < 8:
+        out.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return out
+
+
+def _http_status(err: BaseException) -> int | None:
+    status = getattr(err, "status_code", None)
+    if isinstance(status, int):
+        return status
+    code = getattr(err, "code", None)  # google.genai.errors.APIError
+    if isinstance(code, int) and 100 <= code < 600:
+        return code
+    response = getattr(err, "response", None)
+    if isinstance(response, dict):  # botocore ClientError
+        status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        return status if isinstance(status, int) else None
+    status = getattr(response, "status_code", None)
+    return status if isinstance(status, int) else None
+
+
+def _names(err: BaseException) -> set[str]:
+    return {cls.__name__ for cls in type(err).__mro__}
+
+
+def classify_error(err: BaseException) -> dict[str, Any]:
+    chain = _chain(err)
+    status = next((s for s in map(_http_status, chain) if s is not None), None)
+    kind: str | None = None
+    for e in chain:
+        s = _http_status(e)
+        response = getattr(e, "response", None)
+        aws_code = response.get("Error", {}).get("Code") if isinstance(response, dict) else None
+        rpc_status = getattr(e, "status", None)
+        names = _names(e)
+        if aws_code in TRANSIENT_AWS_CODES or (isinstance(rpc_status, str) and rpc_status in TRANSIENT_STATUSES):
             kind = "provider"
-    except ImportError:  # pragma: no cover - langchain-anthropic is a dependency
-        pass
-    if isinstance(status, int):
-        kind = "provider" if status in (408, 429) or status >= 500 else "provider_rejected" if 400 <= status < 500 else kind
-    error: dict[str, Any] = {"kind": kind, "message": f"{type(err).__name__}: {err}"}
-    if isinstance(status, int):
+        elif s is not None and s >= 400:
+            kind = "provider" if s in (408, 429) or s >= 500 else "provider_rejected"
+        elif names & TRANSIENT_ERROR_NAMES:
+            kind = "provider"
+        elif names & REJECTED_ERROR_NAMES:
+            kind = "provider_rejected"
+        if kind is not None:
+            break
+    error: dict[str, Any] = {"kind": kind or "harness", "message": f"{type(err).__name__}: {err}"}
+    if status is not None:
         error["http_status"] = status
     return error
 
 
-def framework_versions() -> dict[str, str]:
+FRAMEWORK_PACKAGES = ("langgraph", "langchain-core")
+
+
+def framework_versions(provider_package: str | None = None) -> dict[str, str]:
     out = {}
-    for pkg in ("langgraph", "langchain-core", "langchain-anthropic"):
+    for pkg in (*FRAMEWORK_PACKAGES, *((provider_package,) if provider_package else ())):
         try:
             out[pkg] = importlib_metadata.version(pkg)
         except importlib_metadata.PackageNotFoundError:
@@ -162,8 +231,16 @@ def run_cell(
     max_turns: int = DEFAULT_MAX_TURNS,
     reply_tool: str = DEFAULT_REPLY_TOOL,
     timeout_s: float | None = None,
+    target: Any = None,
+    on_sampling_params: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Run one cell and return its trace (not yet written)."""
+    """Run one cell and return its trace (not yet written).
+
+    `target` (a providers.ModelTarget) is what real mode asked for: its model id is the
+    fingerprint's model_name, and its provider and endpoint are recorded next to it. With
+    --model-factory there is no target, the requested id is read from the model's own
+    invocation params, and provider/endpoint are left out rather than guessed.
+    """
     offered = sandbox_tools(tools, task.dangerous)
     recorder = TraceRecorder()
     started_at = iso_now()
@@ -199,16 +276,25 @@ def run_cell(
 
     fingerprint = None
     if recorder.model_responses > 0:
+        if target is not None:
+            requested = target.model
+        else:
+            requested = recorder.model_names[0] if recorder.model_names else "(not reported by the model object)"
         fingerprint = {
-            "model_name": recorder.model_names[0] if recorder.model_names else "(not reported by the model object)",
+            "model_name": requested,
             "model_version": recorder.model_versions[0] if recorder.model_versions else "(not reported by the API)",
             "system_prompt": recorder.system_prompt,
             "tool_schema": tool_schema(offered),
         }
+        if target is not None:
+            fingerprint["provider"] = target.provider
+            fingerprint["endpoint"] = target.endpoint
 
+    if on_sampling_params is not None and recorder.sampling_params is not None:
+        on_sampling_params(recorder.sampling_params)
     return {
         "format": FORMAT,
-        "adapter": {"name": ADAPTER_NAME, "version": __version__, "framework": framework_versions()},
+        "adapter": {"name": ADAPTER_NAME, "version": __version__, "framework": framework_versions(target.package if target is not None else None)},
         "task": task.name,
         "tier": selection.tier,
         "batch": {
@@ -268,6 +354,7 @@ def run_batch(
     max_turns: int = DEFAULT_MAX_TURNS,
     reply_tool: str = DEFAULT_REPLY_TOOL,
     log: Callable[[str], None] = lambda _m: None,
+    target: Any = None,
 ) -> BatchResult:
     """Every cell, trial-major (all variants' trial 1 first), like the MCP batch runner."""
     problems = check_tools(task, tools())
@@ -291,6 +378,8 @@ def run_batch(
             graph_factory=graph_factory,
             max_turns=max_turns,
             reply_tool=reply_tool,
+            target=target,
+            on_sampling_params=(lambda p: log(f"  sampling params in the first model call: {p or 'none'}")) if i == 1 else None,
         )
         path = write_trace(out_dir / trace_filename(task.name, variant.id, trial), trace, schema)
         files.append(path)

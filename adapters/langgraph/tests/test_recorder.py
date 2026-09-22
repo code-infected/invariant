@@ -119,3 +119,21 @@ def test_normalize_matches_the_mcp_proxy_rules():
     assert normalize_tool_response('{"a": 1}') == {"a": 1}
     assert normalize_tool_response("plain text") == "plain text"
     assert normalize_tool_response({"x": [1, 2]}) == {"x": [1, 2]}
+
+
+def test_reported_model_is_what_the_provider_said_never_the_requested_echo():
+    from invariant_langgraph.recorder import reported_model
+
+    assert reported_model({"model_name": "gpt-4.1-2025-04-14", "model_provider": "openai"}) == "gpt-4.1-2025-04-14"
+    assert reported_model({"model": "claude-sonnet-4-5-20250929"}) == "claude-sonnet-4-5-20250929"
+    assert reported_model({"model_name": "gemini-2.5-flash-001", "model_provider": "google_genai"}) == "gemini-2.5-flash-001"
+    # langchain-aws writes the requested id here; Bedrock's Converse API reports none.
+    assert reported_model({"model_name": "amazon.nova-lite-v1:0", "model_provider": "bedrock_converse"}) is None
+    assert reported_model({"model_name": ""}) is None
+    assert reported_model({}) is None
+
+
+def test_a_model_factory_run_records_no_provider_or_endpoint(task, selection):
+    trace = _run(task, selection, [{"tool": "reply_to_user", "args": {"message": "hi"}}])
+    assert "provider" not in trace["fingerprint"] and "endpoint" not in trace["fingerprint"]
+    assert set(trace["adapter"]["framework"]) == {"langgraph", "langchain-core"}
