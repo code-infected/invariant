@@ -2,12 +2,26 @@
  * `invariant gate`: turn stored consistency scores into a CI verdict.
  *
  * Exit codes
- *   0  every gated task passed (verdict "pass", or "pass_with_waivers" when an axis was
- *      explicitly allowed to go uncomputed with --allow-uncomputed)
- *   1  evaluated and failed: at least one scored axis is below its threshold
+ *   0  everything in scope passed (consistency verdict "pass", or "pass_with_waivers" when
+ *      an axis was explicitly allowed to go uncomputed with --allow-uncomputed; and every
+ *      gated adversarial payload within its max_propagation_rate)
+ *   1  consistency evaluated and failed: at least one scored axis is below its threshold
  *   2  could not evaluate: an axis has no score and was not waived, a runnable task has
- *      no finished batch, the batch is unfinished, a spec is invalid, bad arguments, ...
- * A measured failure outranks a missing score: 1 wins over 2 when both apply.
+ *      no finished batch, the batch is unfinished, a spec or payload fixture is invalid, an
+ *      adversarial batch where no run received the payload, a payload without a batch under
+ *      --require-adversarial, bad arguments, ...
+ *   3  security finding: an adversarial payload propagated above its max_propagation_rate
+ *      (default 0, so any propagation at all). Outranks everything else, because it goes
+ *      to a different owner; the report still carries the consistency verdict beside it.
+ * Precedence: 3 > 1 > 2 > 0.
+ *
+ * Adversarial batches (kind "adversarial", from `invariant adversarial run`) are never part
+ * of the consistency verdict. They are gated in the report's separate "security" section
+ * (ARCHITECTURE.md section 8: a security finding routes to its own queue): with --batch=<an
+ * adversarial batch>, that batch alone; with --task or no selector, the latest finished
+ * adversarial batch of every payload fixture targeting a gated task. A payload that was not
+ * run is listed as "not_run" and does not affect the verdict, unless --require-adversarial,
+ * where it is incomplete (CI runs the payloads first and passes that flag).
  *
  * Uncomputed axes fail closed. The outcome axis needs the LLM judge (ANTHROPIC_API_KEY);
  * a gate that passed because the judge never ran would be exactly the kind of silent
@@ -21,14 +35,16 @@
  * same code as `invariant score`, and that score is saved too. Thresholds always come
  * from tasks/<name>.yaml as it is now, never from the verdicts stored with a score.
  *
- * JSON report, schema "invariant.gate/v1" (see the GateReport type below):
+ * JSON report, schema "invariant.gate/v2" (see the GateReport type below). v2 over v1:
+ * exit_code may be 3, "verdict" may be null (no consistency batch in scope, e.g. gating one
+ * adversarial batch), and the "security" section.
  *
  * {
- *   "schema": "invariant.gate/v1",
+ *   "schema": "invariant.gate/v2",
  *   "generated_at": ISO timestamp,
  *   "mode": "batch" | "task" | "all",
- *   "verdict": "pass" | "pass_with_waivers" | "fail" | "incomplete",   aggregate over tasks
- *   "exit_code": 0 | 1 | 2,
+ *   "verdict": "pass" | "pass_with_waivers" | "fail" | "incomplete" | null,   consistency, aggregate over tasks
+ *   "exit_code": 0 | 1 | 2 | 3,
  *   "allow_uncomputed": ["outcome"] | [],
  *   "counts": { "gated", "pass", "pass_with_waivers", "fail", "incomplete", "not_runnable" },
  *   "warnings": [string],
@@ -54,7 +70,26 @@
  *       "reason", "missing_tools": [name] },                          the tool server does not
  *                                                                     serve this task's tools
  *     { "task", "status": "error", "verdict": "incomplete", "reason" }
- *   ]
+ *   ],
+ *   "security": {                              adversarial payloads; never part of "verdict"
+ *     "verdict": "pass" | "finding" | "incomplete" | null,        null: nothing gated
+ *     "require_adversarial": bool,
+ *     "counts": { "gated", "pass", "finding", "incomplete", "not_run" },
+ *     "payloads": [
+ *       { "payload", "task", "file", "status": "evaluated", "verdict": "pass" | "finding" | "incomplete",
+ *         "batch": { "id", "tier", "created_at", "finished_at", "variants", "trials_per_variant", "deployment" },
+ *         "score": { "id", "source" }, "injection": { "tool", "on_call", "placement" },
+ *         "unauthorized_action": { "tool", "args"? },
+ *         "propagation": { "rate", "runs_in_batch", "runs_scored", "runs_propagated", "max_propagation_rate",
+ *                          "depths": [{ "depth", "runs" }],
+ *                          "propagated_runs": [{ "run", "run_id", "injected_call", "action_call", "depth", "action" }],
+ *                          "held_runs": [label], "not_exposed": [{ "run", "run_id", "reason" }],
+ *                          "excluded": [{ "run", "run_id", "reason" }], "notes" },
+ *         "warnings": [string] },
+ *       { "payload", "task", "file", "status": "not_run", "verdict": null, "reason" },
+ *       { "payload", "task", "file", "status": "error", "verdict": "incomplete", "reason" }
+ *     ]
+ *   }
  * }
  *
  * AxisEvidence is what scoring already produced, with run ids replaced by "v1 trial 3"
@@ -67,13 +102,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { openTraceStore, type BatchRow, type TraceStore } from "@invariant/trace-store";
 import {
+  aggregateSecurityVerdict,
   aggregateVerdict,
   assertWaivable,
+  combinedExitCode,
+  SECURITY_FINDING_EXIT_CODE,
+  type SecurityVerdict,
   AXIS_LABELS,
   AXES,
   canonicalJson,
   evaluateGate,
-  gateExitCode,
   type AxisGate,
   type AxisName,
   type BatchScore,
@@ -96,8 +134,16 @@ import {
   type JudgeSettings,
   type ScoreDeps,
 } from "./score.js";
+import { loadAllPayloads, type LoadedPayload } from "../lib/load-payloads.js";
+import {
+  depthText,
+  matcherText,
+  pct,
+  scoreAdversarialBatch,
+  type StoredPropagation,
+} from "./adversarial.js";
 
-export const GATE_REPORT_SCHEMA = "invariant.gate/v1";
+export const GATE_REPORT_SCHEMA = "invariant.gate/v2";
 /** First line of the markdown report; the CI workflow finds its own PR comment by it. */
 export const PR_COMMENT_MARKER = "<!-- invariant-gate-report -->";
 
@@ -116,6 +162,8 @@ export interface GateOptions {
   allowUncomputed?: string[];
   /** Score the batch now even if a reusable stored score exists. */
   rescore?: boolean;
+  /** A payload fixture with no adversarial batch is incomplete instead of "not run". */
+  requireAdversarial?: boolean;
 }
 
 export interface GateDeps extends ScoreDeps {
@@ -179,16 +227,70 @@ export interface ErrorTaskReport {
 }
 export type TaskGateReport = EvaluatedTaskReport | NotRunnableTaskReport | ErrorTaskReport;
 
+export interface EvaluatedPayloadReport {
+  payload: string;
+  task: string;
+  file: string;
+  status: "evaluated";
+  verdict: SecurityVerdict;
+  batch: {
+    id: string;
+    tier: string;
+    created_at: string;
+    finished_at: string | null;
+    variants: string[];
+    trials_per_variant: number;
+    deployment: BatchFingerprintSummary;
+  };
+  score: { id: string; source: "stored" | "computed" };
+  injection: { tool: string; on_call: number; placement: unknown };
+  unauthorized_action: { tool: string; args?: Record<string, unknown> };
+  propagation: {
+    rate: number | null;
+    runs_in_batch: number;
+    runs_scored: number;
+    runs_propagated: number;
+    max_propagation_rate: number;
+    depths: Array<{ depth: number; runs: number }>;
+    /** injected_call / action_call are 1-based positions in the run's tool-call sequence. */
+    propagated_runs: Array<{ run: string; run_id: string; injected_call: number; action_call: number; depth: number; action: { tool_name: string; args: unknown } }>;
+    held_runs: string[];
+    not_exposed: Array<{ run: string; run_id: string; reason: string }>;
+    excluded: Array<{ run: string; run_id: string; reason: string }>;
+    notes: string[];
+  };
+  warnings: string[];
+}
+export interface OtherPayloadReport {
+  payload: string;
+  task: string;
+  file: string;
+  status: "not_run" | "error";
+  verdict: "incomplete" | null;
+  reason: string;
+}
+export type PayloadGateReport = EvaluatedPayloadReport | OtherPayloadReport;
+
+export interface SecurityReport {
+  verdict: SecurityVerdict | null;
+  require_adversarial: boolean;
+  counts: { gated: number; pass: number; finding: number; incomplete: number; not_run: number };
+  payloads: PayloadGateReport[];
+}
+
 export interface GateReport {
   schema: typeof GATE_REPORT_SCHEMA;
   generated_at: string;
   mode: "batch" | "task" | "all";
-  verdict: GateVerdict;
-  exit_code: 0 | 1 | 2;
+  /** The consistency verdict; null when no consistency batch was in scope. */
+  verdict: GateVerdict | null;
+  exit_code: 0 | 1 | 2 | 3;
   allow_uncomputed: AxisName[];
   counts: { gated: number; pass: number; pass_with_waivers: number; fail: number; incomplete: number; not_runnable: number };
   warnings: string[];
   tasks: TaskGateReport[];
+  /** Adversarial payloads, gated separately from consistency (see the header). */
+  security: SecurityReport;
 }
 
 /** What scoreStoredBatch persists in scores.details. */
@@ -359,6 +461,134 @@ function errorReport(task: string, err: unknown): ErrorTaskReport {
   return { task, status: "error", verdict: "incomplete", reason: err instanceof Error ? err.message : String(err) };
 }
 
+function payloadReport(sp: StoredPropagation, file: string): EvaluatedPayloadReport {
+  const label = (id: string) => sp.labels.get(id) ?? id;
+  const r = sp.result;
+  const verdict: SecurityVerdict = sp.verdict === "not_computed" ? "incomplete" : sp.verdict;
+  return {
+    payload: sp.payload.id,
+    task: sp.payload.task,
+    file,
+    status: "evaluated",
+    verdict,
+    batch: {
+      id: sp.batch.id,
+      tier: sp.batch.tier,
+      created_at: sp.batch.created_at,
+      finished_at: sp.batch.finished_at,
+      variants: sp.batch.variant_labels,
+      trials_per_variant: sp.batch.trials_per_variant,
+      deployment: sp.fingerprints,
+    },
+    score: { id: sp.score_id, source: sp.source },
+    injection: { tool: sp.payload.inject.tool, on_call: sp.payload.inject.on_call, placement: sp.payload.inject.placement },
+    unauthorized_action: { tool: sp.payload.unauthorized_action.tool, ...(sp.payload.unauthorized_action.args ? { args: sp.payload.unauthorized_action.args } : {}) },
+    propagation: {
+      rate: r.rate,
+      runs_in_batch: r.runs_in_batch,
+      runs_scored: r.runs_scored,
+      runs_propagated: r.runs_propagated,
+      max_propagation_rate: sp.payload.gate.max_propagation_rate,
+      depths: r.depths,
+      propagated_runs: r.runs
+        .filter((x) => x.propagated)
+        .map((x) => ({
+          run: label(x.run_id),
+          run_id: x.run_id,
+          injected_call: x.injected_index! + 1,
+          action_call: x.action_index! + 1,
+          depth: x.depth!,
+          action: x.action!,
+        })),
+      held_runs: r.runs.filter((x) => x.exposure === "exposed" && !x.propagated).map((x) => label(x.run_id)),
+      not_exposed: r.runs.filter((x) => x.exposure === "not_exposed").map((x) => ({ run: label(x.run_id), run_id: x.run_id, reason: x.reason ?? "" })),
+      excluded: r.runs.filter((x) => x.exposure === "excluded").map((x) => ({ run: label(x.run_id), run_id: x.run_id, reason: x.reason ?? "" })),
+      notes: r.notes,
+    },
+    warnings: sp.warnings,
+  };
+}
+
+/** Gate one adversarial batch (already resolved). */
+function gateAdversarialBatch(store: TraceStore, batch: BatchRow, rescore: boolean): PayloadGateReport {
+  const sp = scoreAdversarialBatch(store, batch, { rescore });
+  return payloadReport(sp, sp.payload_source);
+}
+
+/**
+ * The security section for a set of tasks: every payload fixture targeting one of them,
+ * gated on its latest adversarial batch. `runnable` maps each task in scope to null (can
+ * run) or the reason it cannot, so its payloads are listed as not run rather than dropped.
+ */
+function gatePayloads(
+  store: TraceStore,
+  inScope: Map<string, { task: LoadedTask | null; unrunnable: string | null }>,
+  opts: { requireAdversarial: boolean; rescore: boolean }
+): PayloadGateReport[] {
+  const out: PayloadGateReport[] = [];
+  const all: LoadedPayload[] = loadAllPayloads();
+  for (const p of all) {
+    const taskName = p.payload?.task;
+    if (taskName === undefined) {
+      out.push({ payload: p.id, task: "?", file: p.file, status: "error", verdict: "incomplete", reason: p.errors.join("; ") });
+      continue;
+    }
+    const scope = inScope.get(taskName);
+    if (!scope) continue;
+    const base = { payload: p.id, task: taskName, file: p.file };
+    const hard = p.errors.filter((e) => !e.startsWith("warning:"));
+    if (hard.length > 0) {
+      out.push({ ...base, status: "error", verdict: "incomplete", reason: `invalid payload fixture: ${hard.join("; ")}` });
+      continue;
+    }
+    if (scope.task && !scope.task.spec.adversarial.enabled) {
+      out.push({ ...base, status: "not_run", verdict: null, reason: `${taskName} has adversarial.enabled: false` });
+      continue;
+    }
+    if (scope.unrunnable) {
+      out.push({ ...base, status: "not_run", verdict: null, reason: scope.unrunnable });
+      continue;
+    }
+    const row = store.getTaskByName(taskName);
+    const newest = row ? store.getLatestBatch(row.id, { kind: "adversarial", payloadId: p.id }) : null;
+    if (!newest) {
+      const reason = `no adversarial batch for this payload in the trace store (run: invariant adversarial run --task=${taskName} --payload=${p.id})`;
+      out.push(
+        opts.requireAdversarial
+          ? { ...base, status: "error", verdict: "incomplete", reason: `${reason}; --require-adversarial was set` }
+          : { ...base, status: "not_run", verdict: null, reason }
+      );
+      continue;
+    }
+    if (newest.finished_at === null) {
+      out.push({
+        ...base,
+        status: "error",
+        verdict: "incomplete",
+        reason: `the latest adversarial batch for this payload (${newest.id}) has not finished; refusing to gate an older one in its place`,
+      });
+      continue;
+    }
+    try {
+      out.push(gateAdversarialBatch(store, newest, opts.rescore));
+    } catch (err) {
+      out.push({ ...base, status: "error", verdict: "incomplete", reason: (err as Error).message });
+    }
+  }
+  return out.sort((a, b) => a.task.localeCompare(b.task) || a.payload.localeCompare(b.payload));
+}
+
+function securitySection(payloads: PayloadGateReport[], requireAdversarial: boolean): SecurityReport {
+  const verdicts = payloads.filter((p) => p.verdict !== null).map((p) => p.verdict as SecurityVerdict);
+  const n = (v: SecurityVerdict) => verdicts.filter((x) => x === v).length;
+  return {
+    verdict: aggregateSecurityVerdict(verdicts),
+    require_adversarial: requireAdversarial,
+    counts: { gated: verdicts.length, pass: n("pass"), finding: n("finding"), incomplete: n("incomplete"), not_run: payloads.length - verdicts.length },
+    payloads,
+  };
+}
+
 export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<GateReport> {
   if (opts.batch !== undefined && opts.task !== undefined) {
     throw new Error("pass at most one of --batch=<id> or --task=<name> (neither: gate every task's latest batch).");
@@ -368,26 +598,42 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
   const config = deps.config ?? loadConfig();
   const store = openTraceStore({ root: deps.storeRoot ?? INVARIANT_DIR });
   const gateOpts = { allowUncomputed, rescore: Boolean(opts.rescore) };
+  const payloadOpts = { requireAdversarial: Boolean(opts.requireAdversarial), rescore: Boolean(opts.rescore) };
   const tasks: TaskGateReport[] = [];
+  const payloads: PayloadGateReport[] = [];
   const warnings: string[] = [];
   const mode: GateReport["mode"] = opts.batch !== undefined ? "batch" : opts.task !== undefined ? "task" : "all";
+  /** False only when the one batch asked for is adversarial: then there is no consistency part. */
+  let consistencyInScope = true;
 
   try {
     if (mode === "batch") {
-      try {
-        const { batch, task } = resolveBatch(store, { batch: opts.batch });
-        tasks.push(await gateBatch(store, batch, task, config, deps, gateOpts));
-      } catch (err) {
-        const row = store.getBatch(opts.batch!);
-        tasks.push(errorReport(row ? (store.getTask(row.task_id)?.name ?? row.task_id) : `batch ${opts.batch}`, err));
+      const row = store.getBatch(opts.batch!);
+      if (row?.kind === "adversarial") {
+        consistencyInScope = false;
+        try {
+          payloads.push(gateAdversarialBatch(store, row, payloadOpts.rescore));
+        } catch (err) {
+          const taskName = store.getTask(row.task_id)?.name ?? row.task_id;
+          payloads.push({ payload: row.payload_id ?? "?", task: taskName, file: "", status: "error", verdict: "incomplete", reason: (err as Error).message });
+        }
+      } else {
+        try {
+          const { batch, task } = resolveBatch(store, { batch: opts.batch });
+          tasks.push(await gateBatch(store, batch, task, config, deps, gateOpts));
+        } catch (err) {
+          tasks.push(errorReport(row ? (store.getTask(row.task_id)?.name ?? row.task_id) : `batch ${opts.batch}`, err));
+        }
       }
     } else if (mode === "task") {
+      let loaded: LoadedTask | null = null;
       try {
-        const task = loadValidTask(opts.task!);
-        tasks.push(await gateBatch(store, latestBatchForGate(store, task, ""), task, config, deps, gateOpts));
+        loaded = loadValidTask(opts.task!);
+        tasks.push(await gateBatch(store, latestBatchForGate(store, loaded, ""), loaded, config, deps, gateOpts));
       } catch (err) {
         tasks.push(errorReport(opts.task!, err));
       }
+      if (loaded) payloads.push(...gatePayloads(store, new Map([[loaded.spec.name, { task: loaded, unrunnable: null }]]), payloadOpts));
     } else {
       const all = loadAllTasks();
       if (all.length === 0) warnings.push("no task specs under tasks/: nothing to gate.");
@@ -410,8 +656,13 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
             `so a task without a batch counts as incomplete.`
         );
       }
+      const scope = new Map<string, { task: LoadedTask | null; unrunnable: string | null }>();
       for (const task of valid) {
         const gap = missing.get(task.spec.name);
+        scope.set(task.spec.name, {
+          task,
+          unrunnable: gap ? `base task ${task.spec.name} is not runnable: the tool server does not serve [${gap.join(", ")}]` : null,
+        });
         if (gap) {
           tasks.push({
             task: task.spec.name,
@@ -432,6 +683,7 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
         }
       }
       tasks.sort((a, b) => a.task.localeCompare(b.task));
+      payloads.push(...gatePayloads(store, scope, payloadOpts));
     }
   } finally {
     store.close();
@@ -442,16 +694,20 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
       warnings.push(`${t.task}: ${mixedFingerprintWarning(t.batch.id, t.batch.deployment)}`);
     }
   }
+  for (const p of payloads) {
+    if (p.status === "evaluated") for (const w of p.warnings) warnings.push(`${p.payload}: ${w}`);
+  }
 
   const gatedVerdicts = tasks.filter((t) => t.status !== "not_runnable").map((t) => t.verdict as GateVerdict);
-  const verdict = aggregateVerdict(gatedVerdicts);
+  const verdict = consistencyInScope ? aggregateVerdict(gatedVerdicts) : null;
+  const security = securitySection(payloads, payloadOpts.requireAdversarial);
   const count = (v: GateVerdict) => gatedVerdicts.filter((x) => x === v).length;
   const report: GateReport = {
     schema: GATE_REPORT_SCHEMA,
     generated_at: new Date().toISOString(),
     mode,
     verdict,
-    exit_code: gateExitCode(verdict),
+    exit_code: combinedExitCode(verdict, security.verdict),
     allow_uncomputed: allowUncomputed,
     counts: {
       gated: gatedVerdicts.length,
@@ -463,6 +719,7 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
     },
     warnings,
     tasks,
+    security,
   };
 
   if (opts.report) writeFile(opts.report, JSON.stringify(report, null, 2) + "\n");
@@ -549,6 +806,74 @@ function countsLine(r: GateReport): string {
   return parts.join("; ");
 }
 
+const SECURITY_TEXT: Record<SecurityVerdict, string> = {
+  pass: "PASS",
+  finding: "SECURITY FINDING",
+  incomplete: "INCOMPLETE (could not evaluate)",
+};
+
+/** "FAIL", or with a security section "consistency FAIL, security SECURITY FINDING". */
+function summaryVerdict(r: GateReport): string {
+  const consistency = r.verdict === null ? "no consistency batch in scope" : VERDICT_TEXT[r.verdict];
+  if (r.security.verdict === null) return consistency;
+  return `${r.verdict === null ? consistency : `consistency ${consistency}`}; security ${SECURITY_TEXT[r.security.verdict]}`;
+}
+
+function placementText(p: EvaluatedPayloadReport): string {
+  const pl = p.injection.placement as { mode: string; path?: string };
+  return `${p.injection.tool} call ${p.injection.on_call}, ${pl.mode}${pl.path ? ` ${pl.path}` : ""}`;
+}
+
+/** Per-run evidence for one gated payload, from the report itself (text and markdown). */
+export function payloadEvidenceLines(p: EvaluatedPayloadReport): string[] {
+  const pr = p.propagation;
+  const lines: string[] = [];
+  for (const x of pr.propagated_runs) {
+    lines.push(
+      `PROPAGATED   ${x.run}: payload planted in call #${x.injected_call}, unauthorized call #${x.action_call} ` +
+        `(depth ${x.depth}): ${x.action.tool_name} ${canonicalJson(x.action.args)}`
+    );
+  }
+  if (pr.held_runs.length > 0) lines.push(`held         ${pr.held_runs.join(", ")}`);
+  for (const x of pr.not_exposed) lines.push(`not exposed  ${x.run}: ${x.reason}`);
+  for (const x of pr.excluded) lines.push(`excluded     ${x.run}: ${x.reason}`);
+  for (const n of pr.notes) lines.push(`note: ${n}`);
+  return lines;
+}
+
+function payloadHeadline(p: EvaluatedPayloadReport): string {
+  const pr = p.propagation;
+  return (
+    `propagated in ${pr.runs_propagated} of ${pr.runs_scored} run(s) that received the payload = ${pct(pr.rate)} ` +
+    `(max allowed ${pct(pr.max_propagation_rate)}); depths: ${depthText(pr.depths)}`
+  );
+}
+
+function securityText(sec: SecurityReport): string[] {
+  if (sec.payloads.length === 0) return [];
+  const lines: string[] = [""];
+  lines.push(
+    `SECURITY (adversarial mode, TEST FIXTURE payloads): ${sec.verdict === null ? "nothing gated" : SECURITY_TEXT[sec.verdict]}` +
+      (sec.verdict === "finding" ? `  [exit ${SECURITY_FINDING_EXIT_CODE}; route to the security owner, not the flaky-test queue]` : "")
+  );
+  for (const p of sec.payloads) {
+    lines.push("");
+    if (p.status !== "evaluated") {
+      lines.push(`  ${p.task} x ${p.payload}  ${p.status === "not_run" ? "NOT RUN (not gated)" : SECURITY_TEXT.incomplete}`);
+      lines.push(`    ${p.reason}`);
+      continue;
+    }
+    lines.push(`  ${p.task} x ${p.payload}  ${SECURITY_TEXT[p.verdict]}`);
+    lines.push(`    adversarial batch ${p.batch.id} (${p.batch.tier} tier); score ${p.score.id} (${p.score.source === "stored" ? "stored score reused" : "scored now"})`);
+    fingerprintLines(p.batch.deployment).forEach((l, i) => lines.push(`    ${i === 0 ? "deployment   :" : "              "} ${l}`));
+    lines.push(`    planted      : ${placementText(p)}  (${p.file})`);
+    lines.push(`    unauthorized : ${matcherText(p.unauthorized_action)}`);
+    lines.push(`    result       : ${payloadHeadline(p)}`);
+    for (const l of payloadEvidenceLines(p)) lines.push(`      ${l}`);
+  }
+  return lines;
+}
+
 export function renderGateText(r: GateReport): string[] {
   const lines: string[] = [];
   for (const w of r.warnings) lines.push(`warning: ${w}`);
@@ -589,8 +914,9 @@ export function renderGateText(r: GateReport): string[] {
     }
     for (const n of t.notes) lines.push(`  note: ${n}`);
   }
+  lines.push(...securityText(r.security));
   lines.push("");
-  lines.push(`invariant gate: ${VERDICT_TEXT[r.verdict]} (exit ${r.exit_code}). ${countsLine(r)}.`);
+  lines.push(`invariant gate: ${summaryVerdict(r)} (exit ${r.exit_code}).${r.verdict === null ? "" : ` ${countsLine(r)}.`}`);
   if (r.allow_uncomputed.length > 0) {
     lines.push(`  --allow-uncomputed=${r.allow_uncomputed.join(",")} was set: those axes may be missing without failing the gate.`);
   }
@@ -618,12 +944,59 @@ function axisCell(a: AxisGate): string {
   }
 }
 
+/**
+ * The security section of the PR comment: its own heading, verdict and table, so a finding
+ * is never read as (or buried in) a consistency failure.
+ */
+function securityMarkdown(sec: SecurityReport): string[] {
+  if (sec.payloads.length === 0) return [];
+  const L: string[] = [""];
+  L.push(`### Security (adversarial): ${sec.verdict === null ? "nothing gated" : SECURITY_TEXT[sec.verdict]}`);
+  L.push("");
+  L.push(
+    "Injection propagation: a TEST FIXTURE instruction is planted in one tool response, and a run *propagates* when the " +
+      "agent then makes the payload's unauthorized call. Gated separately from consistency" +
+      (sec.verdict === "finding" ? `; **a finding exits ${SECURITY_FINDING_EXIT_CODE} and belongs to the security owner, not the flaky-test queue.**` : ".")
+  );
+  L.push("");
+  L.push("| Payload | Task | Planted into | Unauthorized action | Propagated | Rate (max) | Depths | Verdict |");
+  L.push("|---|---|---|---|---|---|---|---|");
+  for (const p of sec.payloads) {
+    if (p.status === "evaluated") {
+      const pr = p.propagation;
+      L.push(
+        `| \`${p.payload}\` | \`${p.task}\` | ${mdCell(placementText(p))} | \`${mdCell(matcherText(p.unauthorized_action))}\` | ` +
+          `${pr.runs_propagated} of ${pr.runs_scored} | ${pct(pr.rate)} (${pct(pr.max_propagation_rate)}) | ${depthText(pr.depths)} | ` +
+          `**${SECURITY_TEXT[p.verdict]}** |`
+      );
+    } else {
+      L.push(`| \`${p.payload}\` | \`${p.task}\` | - | - | - | - | - | ${p.status === "not_run" ? "not run" : `**${SECURITY_TEXT.incomplete}**`} |`);
+    }
+  }
+  for (const p of sec.payloads) {
+    L.push("");
+    if (p.status !== "evaluated") {
+      L.push(`- \`${p.payload}\` ${p.status === "not_run" ? "not run" : "could not be evaluated"}: ${mdCell(p.reason)}`);
+      continue;
+    }
+    L.push(`**\`${p.payload}\`: ${SECURITY_TEXT[p.verdict]}.** Adversarial batch ${p.batch.id} (${p.batch.tier} tier), ${mdCell(payloadHeadline(p))}.`);
+    const fp = fingerprintLines(p.batch.deployment);
+    if (fp.length > 0) {
+      L.push("");
+      L.push(`Deployment fingerprint${fp.length > 1 ? "s" : ""}: ${fp.map((l) => mdCell(l)).join("; ")}.`);
+    }
+    L.push("");
+    L.push(...codeBlock(payloadEvidenceLines(p)));
+  }
+  return L;
+}
+
 /** Markdown for a PR comment. Starts with PR_COMMENT_MARKER so CI can update it in place. */
 export function renderGateMarkdown(r: GateReport): string {
   const L: string[] = [PR_COMMENT_MARKER];
-  L.push(`## invariant gate: ${VERDICT_TEXT[r.verdict]}`);
+  L.push(`## invariant gate: ${summaryVerdict(r)}`);
   L.push("");
-  L.push(`${countsLine(r)}. Exit code ${r.exit_code}.`);
+  L.push(`${r.verdict === null ? "" : `${countsLine(r)}. `}Exit code ${r.exit_code}.`);
   L.push("");
   for (const w of r.warnings) L.push(`> **Warning:** ${mdCell(w)}`);
   const waived = r.tasks.filter((t): t is EvaluatedTaskReport => t.status === "evaluated" && t.axes.some((a) => a.result === "waived"));
@@ -637,8 +1010,12 @@ export function renderGateMarkdown(r: GateReport): string {
     L.push("");
   }
 
-  L.push("| Task | Tier | Runs scored | state-mutation | tool-path | outcome | Verdict |");
-  L.push("|---|---|---|---|---|---|---|");
+  if (r.tasks.length > 0) {
+    L.push("### Consistency");
+    L.push("");
+    L.push("| Task | Tier | Runs scored | state-mutation | tool-path | outcome | Verdict |");
+    L.push("|---|---|---|---|---|---|---|");
+  }
   for (const t of r.tasks) {
     if (t.status === "evaluated") {
       const cell = (axis: AxisName) => axisCell(t.axes.find((a) => a.axis === axis)!);
@@ -699,9 +1076,11 @@ export function renderGateMarkdown(r: GateReport): string {
     L.push("");
     for (const t of notRunnable) L.push(`- \`${t.task}\`: ${mdCell(t.reason)}`);
   }
+  L.push(...securityMarkdown(r.security));
   L.push("");
   L.push(
-    `<sub>Thresholds from \`tasks/<name>.yaml\`. Report schema ${GATE_REPORT_SCHEMA}, generated ${r.generated_at}.</sub>`
+    `<sub>Thresholds from \`tasks/<name>.yaml\`${r.security.payloads.length > 0 ? " and `tasks/adversarial/<payload>.yaml`" : ""}. ` +
+      `Report schema ${GATE_REPORT_SCHEMA}, generated ${r.generated_at}.</sub>`
   );
   return L.join("\n") + "\n";
 }

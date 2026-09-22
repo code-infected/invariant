@@ -55,8 +55,11 @@ async function start() {
         response: record.response,
         is_sandboxed: record.is_sandboxed,
         called_at: record.timestamp,
+        injection_payload_id: record.injection_payload_id ?? null,
       });
     },
+    injection: config.injection,
+    onInjectionSkipped: (reason) => process.stderr.write(`invariant-mcp-proxy: ${reason}\n`),
   });
 }
 
@@ -86,5 +89,9 @@ await proxy.connect(new StdioServerTransport());
 process.stderr.write(
   `invariant-mcp-proxy: recording run ${config.run_id}, ` +
     `forwarding to "${config.upstream.command} ${(config.upstream.args ?? []).join(" ")}", ` +
-    `sandboxing [${config.dangerous_tools.map((t) => t.name).join(", ") || "nothing"}]\n`
+    `sandboxing [${config.dangerous_tools.map((t) => t.name).join(", ") || "nothing"}]` +
+    (config.injection
+      ? `, ADVERSARIAL TEST FIXTURE: planting payload ${config.injection.payload_id} into ${config.injection.tool} call ${config.injection.on_call}`
+      : "") +
+    "\n"
 );

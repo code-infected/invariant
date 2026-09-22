@@ -8,7 +8,8 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { DangerousTool, UpstreamConfig } from "./config.js";
+import type { DangerousTool, Injection, UpstreamConfig } from "./config.js";
+import { injectIntoResult } from "./inject.js";
 
 /**
  * One recorded tool call, shaped exactly like the trace schema in
@@ -22,6 +23,8 @@ export interface ProxyToolCallRecord {
   response: unknown;
   is_sandboxed: boolean;
   timestamp: string;
+  /** Present only when the proxy planted this payload's text into the response. */
+  injection_payload_id?: string;
 }
 
 export type ToolCallRecorder = (record: ProxyToolCallRecord) => void;
@@ -38,6 +41,13 @@ export interface ProxyOptions {
   serverInfo?: { name: string; version: string };
   /** Where the upstream server's stderr goes. Defaults to inheriting this process's. */
   upstreamStderr?: "inherit" | "ignore";
+  /**
+   * Adversarial mode: plant a payload into one targeted response. Absent (the default and
+   * every consistency run), the proxy never modifies a response.
+   */
+  injection?: Injection;
+  /** Told when the targeted call happened but the payload could not be planted, and why. */
+  onInjectionSkipped?: (reason: string) => void;
 }
 
 /**
@@ -88,6 +98,8 @@ export function normalizeToolResponse(result: CallToolResult): unknown {
 export class InvariantProxy {
   private sequenceIndex = 0;
   private readonly dangerous: Map<string, DangerousTool>;
+  /** Calls seen so far per tool name, for picking the injection's on_call-th call. */
+  private readonly callsPerTool = new Map<string, number>();
   private closed = false;
 
   private constructor(
@@ -95,7 +107,9 @@ export class InvariantProxy {
     private readonly upstreamClient: Client,
     private readonly upstreamTransport: StdioClientTransport,
     dangerousTools: DangerousTool[],
-    private readonly record: ToolCallRecorder
+    private readonly record: ToolCallRecorder,
+    private readonly injection: Injection | undefined,
+    private readonly onInjectionSkipped: (reason: string) => void
   ) {
     this.dangerous = new Map(dangerousTools.map((t) => [t.name, t]));
   }
@@ -130,7 +144,9 @@ export class InvariantProxy {
       upstreamClient,
       upstreamTransport,
       options.dangerous_tools ?? [],
-      options.record
+      options.record,
+      options.injection,
+      options.onInjectionSkipped ?? (() => undefined)
     );
 
     server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -158,52 +174,55 @@ export class InvariantProxy {
     const timestamp = new Date().toISOString();
     const args = params.arguments ?? {};
     const sandboxed = this.dangerous.get(params.name);
-
-    if (sandboxed) {
-      const result: CallToolResult = {
-        content: [{ type: "text", text: sandboxed.sandbox_response }],
-      };
-      this.record({
-        sequence_index: sequenceIndex,
-        tool_name: params.name,
-        args,
-        response: normalizeToolResponse(result),
-        is_sandboxed: true,
-        timestamp,
-      });
-      return result;
-    }
+    const nthCall = (this.callsPerTool.get(params.name) ?? 0) + 1;
+    this.callsPerTool.set(params.name, nthCall);
 
     let result: CallToolResult;
-    try {
-      result = (await this.upstreamClient.callTool({
-        name: params.name,
-        arguments: args,
-      })) as CallToolResult;
-    } catch (err) {
-      // An upstream failure is still a tool call the agent made and reacted to, so it is
-      // recorded like any other, and relayed as a tool error rather than a protocol error
-      // so the agent sees what it would have seen talking to the server directly.
-      const message = err instanceof Error ? err.message : String(err);
-      result = { content: [{ type: "text", text: message }], isError: true };
-      this.record({
-        sequence_index: sequenceIndex,
-        tool_name: params.name,
-        args,
-        response: normalizeToolResponse(result),
-        is_sandboxed: false,
-        timestamp,
-      });
-      return result;
+    if (sandboxed) {
+      result = { content: [{ type: "text", text: sandboxed.sandbox_response }] };
+    } else {
+      try {
+        result = (await this.upstreamClient.callTool({
+          name: params.name,
+          arguments: args,
+        })) as CallToolResult;
+      } catch (err) {
+        // An upstream failure is still a tool call the agent made and reacted to, so it is
+        // recorded like any other, and relayed as a tool error rather than a protocol error
+        // so the agent sees what it would have seen talking to the server directly.
+        const message = err instanceof Error ? err.message : String(err);
+        result = { content: [{ type: "text", text: message }], isError: true };
+      }
     }
 
+    let injectedWith: string | undefined;
+    const inj = this.injection;
+    if (inj && inj.tool === params.name && inj.on_call === nthCall) {
+      if (sandboxed && !inj.into_sandboxed) {
+        this.onInjectionSkipped(
+          `${params.name} call ${nthCall} is sandboxed and payload ${inj.payload_id} does not set into_sandboxed; relayed unmodified`
+        );
+      } else {
+        const outcome = injectIntoResult(result, inj.placement, inj.text);
+        if (outcome.ok) {
+          result = outcome.result;
+          injectedWith = inj.payload_id;
+        } else {
+          this.onInjectionSkipped(`payload ${inj.payload_id} not planted in ${params.name} call ${nthCall}: ${outcome.reason}; relayed unmodified`);
+        }
+      }
+    }
+
+    // Recorded as the agent receives it: an injected response is recorded injected, and
+    // flagged, so the trace shows exactly what the agent saw and where the payload entered.
     this.record({
       sequence_index: sequenceIndex,
       tool_name: params.name,
       args,
       response: normalizeToolResponse(result),
-      is_sandboxed: false,
+      is_sandboxed: sandboxed !== undefined,
       timestamp,
+      ...(injectedWith !== undefined ? { injection_payload_id: injectedWith } : {}),
     });
     return result;
   }

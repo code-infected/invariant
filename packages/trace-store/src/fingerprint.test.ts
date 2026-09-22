@@ -140,7 +140,8 @@ describe("deployment fingerprints in the store", () => {
       db.exec(`
         insert into tasks values ('t1','old','p','r','[]','[]','[]','{}',null,'2026-09-19T00:00:00Z');
         insert into variants values ('v1','t1','v1','x',1,null,null);
-        insert into batches values ('b1','t1','smoke',1,1,'["v1"]','2026-09-19T00:00:00Z','2026-09-19T00:01:00Z');
+        insert into batches (id, task_id, tier, trials_per_variant, variants_requested, variant_labels, created_at, finished_at)
+          values ('b1','t1','smoke',1,1,'["v1"]','2026-09-19T00:00:00Z','2026-09-19T00:01:00Z');
         insert into runs (id, task_id, variant_id, batch_id, trial_number, status, created_at)
           values ('r1','t1','v1','b1',1,'ok','2026-09-19T00:00:00Z');
       `);

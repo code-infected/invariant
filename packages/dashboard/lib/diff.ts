@@ -6,6 +6,8 @@ export interface CallView {
   sequence_index: number;
   tool_name: string;
   is_sandboxed: boolean;
+  /** Adversarial runs: the proxy planted a payload into this call's response. */
+  is_injected: boolean;
   args_raw: unknown;
   /** Args with the task's volatile fields replaced by <masked>, as the scorer compares them. */
   args_masked: unknown;
@@ -71,6 +73,7 @@ function callView(c: ToolCallRow, volatile: string[]): CallView {
     sequence_index: c.sequence_index,
     tool_name: c.tool_name,
     is_sandboxed: c.is_sandboxed,
+    is_injected: c.is_injected,
     args_raw: c.args,
     args_masked: maskVolatile(c.args, volatile),
     masked_fields: maskedPaths(c.args, volatile),

@@ -3,7 +3,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { proxyBinPath, type DangerousTool, type ProxyConfig, type UpstreamConfig } from "@invariant/mcp-proxy";
+import { proxyBinPath, type DangerousTool, type InjectionInput, type ProxyConfig, type UpstreamConfig } from "@invariant/mcp-proxy";
 import { computeDeploymentFingerprint, type RunRecord, type RunStatus, type TraceStore } from "@invariant/trace-store";
 import {
   callMessages,
@@ -69,6 +69,11 @@ export interface TrialPlan {
   batch_id?: string | null;
   /** Which try at this (variant, trial) cell this is. Defaults to 1. */
   attempt?: number;
+  /**
+   * Adversarial mode only: the payload the proxy plants into one targeted tool response.
+   * The agent is told nothing; it sees whatever the proxy relays.
+   */
+  injection?: InjectionInput;
 }
 
 export interface TrialDeps {
@@ -159,6 +164,7 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
     trace_store_root: store.root,
     upstream: plan.upstream,
     dangerous_tools: plan.dangerous_tools,
+    ...(plan.injection ? { injection: { into_sandboxed: false, ...plan.injection } } : {}),
   };
   fs.writeFileSync(configPath, JSON.stringify(proxyConfig, null, 2), "utf8");
 
@@ -327,6 +333,7 @@ export async function runTrial(plan: TrialPlan, deps: TrialDeps): Promise<TrialR
     tool_schemas: toolDefs,
     upstream: plan.upstream,
     dangerous_tools: plan.dangerous_tools,
+    injection: plan.injection ?? null,
     status,
     stop_reason: stopReason,
     error: error ?? null,

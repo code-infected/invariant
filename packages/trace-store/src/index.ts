@@ -21,7 +21,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { POST_MIGRATION_SQL, REQUIRED_TABLES, RUNS_MIGRATIONS, SCHEMA_SQL } from "./schema.js";
+import { POST_MIGRATION_SQL, REQUIRED_TABLES, RUNS_MIGRATIONS, SCHEMA_SQL, TABLE_MIGRATIONS } from "./schema.js";
 import { changedComponents, isScriptedStandIn, type DeploymentFingerprint, type FingerprintComponent } from "./fingerprint.js";
 
 export { SCHEMA_SQL };
@@ -41,6 +41,13 @@ export type RunStatus = "running" | "ok" | "timeout" | "infra_error";
 
 export type Tier = "smoke" | "full";
 
+/**
+ * consistency  an ordinary fan-out, scored on the three consistency axes.
+ * adversarial  a fan-out with a planted instruction (ARCHITECTURE.md section 4), scored
+ *              only for injection propagation. Never mixed into consistency readers.
+ */
+export type BatchKind = "consistency" | "adversarial";
+
 export interface CreateBatchInput {
   task_id: string;
   tier: Tier;
@@ -49,6 +56,12 @@ export interface CreateBatchInput {
   variants_requested: number;
   /** Fixture labels actually run, in fixture order. */
   variant_labels: string[];
+  /** Defaults to "consistency". */
+  kind?: BatchKind;
+  /** Adversarial batches only: the payload fixture's id. */
+  payload_id?: string | null;
+  /** Adversarial batches only: a snapshot of the payload as it was run. Stored as JSON. */
+  adversarial_payload?: unknown;
 }
 
 export interface BatchRow {
@@ -60,6 +73,9 @@ export interface BatchRow {
   variant_labels: string[];
   created_at: string;
   finished_at: string | null;
+  kind: BatchKind;
+  payload_id: string | null;
+  adversarial_payload: unknown;
 }
 
 export interface RecordScoreInput {
@@ -145,6 +161,8 @@ export interface ToolCallInput {
   response: unknown;
   is_sandboxed: boolean;
   called_at: string;
+  /** Set when the proxy planted this payload's text into the response (adversarial mode). */
+  injection_payload_id?: string | null;
 }
 
 export interface TaskRow {
@@ -197,6 +215,10 @@ export interface ToolCallRow {
   response: unknown;
   is_sandboxed: boolean;
   timestamp: string;
+  /** Adversarial mode: the proxy modified this call's response before the agent saw it. */
+  is_injected: boolean;
+  /** The payload whose text was planted, when is_injected. */
+  injection_payload_id: string | null;
 }
 
 /** A run plus its ordered tool calls: the "trace record" the orchestrator hands back. */
@@ -338,7 +360,15 @@ export class TraceStore {
       const columns = new Set((this.db.prepare("pragma table_info(runs)").all() as Array<{ name: string }>).map((c) => c.name));
       for (const m of RUNS_MIGRATIONS) if (!columns.has(m.column)) missing.push(`runs.${m.column}`);
     }
+    for (const m of TABLE_MIGRATIONS) {
+      if (!tables.has(m.table)) continue;
+      if (!this.columnsOf(m.table).has(m.column)) missing.push(`${m.table}.${m.column}`);
+    }
     return missing;
+  }
+
+  private columnsOf(table: string): Set<string> {
+    return new Set((this.db.prepare(`pragma table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name));
   }
 
   private migrate(): void {
@@ -351,6 +381,9 @@ export class TraceStore {
         );
         for (const m of RUNS_MIGRATIONS) {
           if (!columns.has(m.column)) this.db.exec(m.ddl);
+        }
+        for (const m of TABLE_MIGRATIONS) {
+          if (!this.columnsOf(m.table).has(m.column)) this.db.exec(m.ddl);
         }
         this.db.exec(POST_MIGRATION_SQL);
       })
@@ -447,8 +480,10 @@ export class TraceStore {
     const id = randomUUID();
     this.db
       .prepare(
-        `insert into batches (id, task_id, tier, trials_per_variant, variants_requested, variant_labels, created_at)
-         values (@id, @task_id, @tier, @trials_per_variant, @variants_requested, @variant_labels, @created_at)`
+        `insert into batches (id, task_id, tier, trials_per_variant, variants_requested, variant_labels, created_at,
+           kind, payload_id, adversarial_payload)
+         values (@id, @task_id, @tier, @trials_per_variant, @variants_requested, @variant_labels, @created_at,
+           @kind, @payload_id, @adversarial_payload)`
       )
       .run({
         id,
@@ -458,6 +493,9 @@ export class TraceStore {
         variants_requested: input.variants_requested,
         variant_labels: toJson(input.variant_labels),
         created_at: new Date().toISOString(),
+        kind: input.kind ?? "consistency",
+        payload_id: input.payload_id ?? null,
+        adversarial_payload: input.adversarial_payload === undefined ? null : toJson(input.adversarial_payload),
       });
     return id;
   }
@@ -471,10 +509,14 @@ export class TraceStore {
 
   getBatch(id: string): BatchRow | null {
     const row = this.db.prepare("select * from batches where id = ?").get(id) as
-      | (Omit<BatchRow, "variant_labels"> & { variant_labels: string })
+      | (Omit<BatchRow, "variant_labels" | "adversarial_payload"> & { variant_labels: string; adversarial_payload: string | null })
       | undefined;
     if (!row) return null;
-    return { ...row, variant_labels: fromJson(row.variant_labels) as string[] };
+    return {
+      ...row,
+      variant_labels: fromJson(row.variant_labels) as string[],
+      adversarial_payload: fromJson(row.adversarial_payload),
+    };
   }
 
   /**
@@ -489,14 +531,21 @@ export class TraceStore {
   }
 
   /**
-   * The task's most recent batch by creation time. With finishedOnly, skips batches still
-   * in flight (or whose process died before finishBatch), whose matrix may be partial.
+   * The task's most recent batch of one kind (default: consistency) by creation time. With
+   * finishedOnly, skips batches still in flight (or whose process died before
+   * finishBatch), whose matrix may be partial. With payloadId (adversarial batches), only
+   * that payload's batches count.
    */
-  getLatestBatch(taskId: string, options: { finishedOnly?: boolean } = {}): BatchRow | null {
-    const sql = options.finishedOnly
-      ? "select id from batches where task_id = ? and finished_at is not null order by created_at desc limit 1"
-      : "select id from batches where task_id = ? order by created_at desc limit 1";
-    const row = this.db.prepare(sql).get(taskId) as { id: string } | undefined;
+  getLatestBatch(
+    taskId: string,
+    options: { finishedOnly?: boolean; kind?: BatchKind; payloadId?: string } = {}
+  ): BatchRow | null {
+    const where = ["task_id = @task_id", "kind = @kind"];
+    if (options.finishedOnly) where.push("finished_at is not null");
+    if (options.payloadId !== undefined) where.push("payload_id = @payload_id");
+    const row = this.db
+      .prepare(`select id from batches where ${where.join(" and ")} order by created_at desc, rowid desc limit 1`)
+      .get({ task_id: taskId, kind: options.kind ?? "consistency", payload_id: options.payloadId ?? null }) as { id: string } | undefined;
     return row ? this.getBatch(row.id) : null;
   }
 
@@ -601,8 +650,10 @@ export class TraceStore {
     const id = randomUUID();
     this.db
       .prepare(
-        `insert into tool_calls (id, run_id, sequence_index, tool_name, args_json, response_json, is_sandboxed, called_at)
-         values (@id, @run_id, @sequence_index, @tool_name, @args_json, @response_json, @is_sandboxed, @called_at)`
+        `insert into tool_calls (id, run_id, sequence_index, tool_name, args_json, response_json, is_sandboxed, called_at,
+           is_injected, injection_payload_id)
+         values (@id, @run_id, @sequence_index, @tool_name, @args_json, @response_json, @is_sandboxed, @called_at,
+           @is_injected, @injection_payload_id)`
       )
       .run({
         id,
@@ -613,6 +664,8 @@ export class TraceStore {
         response_json: toJson(input.response),
         is_sandboxed: input.is_sandboxed ? 1 : 0,
         called_at: input.called_at,
+        is_injected: input.injection_payload_id ? 1 : 0,
+        injection_payload_id: input.injection_payload_id ?? null,
       });
     return id;
   }
@@ -663,6 +716,8 @@ export class TraceStore {
       response: fromJson((row.response_json as string | null) ?? null),
       is_sandboxed: row.is_sandboxed === 1,
       timestamp: row.called_at as string,
+      is_injected: row.is_injected === 1,
+      injection_payload_id: (row.injection_payload_id as string | null) ?? null,
     }));
   }
 
@@ -787,9 +842,14 @@ export class TraceStore {
     return ids.map((r) => this.getTask(r.id)!);
   }
 
-  /** A task's batches, oldest first (the order a trend reads in). */
-  listBatches(taskId: string): BatchRow[] {
-    const ids = this.db.prepare("select id from batches where task_id = ? order by created_at, rowid").all(taskId) as Array<{ id: string }>;
+  /**
+   * A task's batches of one kind, oldest first (the order a trend reads in). Defaults to
+   * consistency batches, so no consistency reader ever sees an adversarial batch by accident.
+   */
+  listBatches(taskId: string, options: { kind?: BatchKind } = {}): BatchRow[] {
+    const ids = this.db
+      .prepare("select id from batches where task_id = ? and kind = ? order by created_at, rowid")
+      .all(taskId, options.kind ?? "consistency") as Array<{ id: string }>;
     return ids.map((r) => this.getBatch(r.id)!);
   }
 

@@ -8,6 +8,7 @@ import { runScore } from "./commands/score.js";
 import { runGate } from "./commands/gate.js";
 import { runDemoSeed } from "./commands/demo-seed.js";
 import { runDashboard } from "./commands/dashboard.js";
+import { runAdversarialCommand } from "./commands/adversarial.js";
 
 const program = new Command();
 
@@ -104,7 +105,8 @@ program
   .command("gate")
   .description(
     "Compare a batch's consistency scores to its task's thresholds and exit for CI: 0 pass, 1 an axis scored " +
-      "below its threshold, 2 could not evaluate (an axis has no score, no finished batch, invalid spec...). " +
+      "below its threshold, 2 could not evaluate (an axis has no score, no finished batch, invalid spec...), " +
+      "3 security finding (an adversarial payload propagated; reported in its own security section, and 3 outranks 1 and 2). " +
       "Reuses the batch's stored score when it is still valid, otherwise scores it first (same code as " +
       "invariant score). With neither --batch nor --task, gates the latest batch of every task; tasks the tool " +
       "server cannot run are listed as not gated. Uncomputed axes fail closed: the outcome axis needs " +
@@ -121,6 +123,7 @@ program
       "The verdict is then pass_with_waivers, not pass, and the report names the waived axis"
   )
   .option("--rescore", "score the batch now even if a reusable stored score exists", false)
+  .option("--require-adversarial", "a payload fixture of a gated task with no adversarial batch is incomplete (exit 2), not 'not run'", false)
   .option("--store <path>", "trace store directory holding trace.db (default: .invariant at the repo root)")
   .action(async (opts) => {
     try {
@@ -137,6 +140,7 @@ program
               .filter(Boolean)
           : [],
         rescore: Boolean(opts.rescore),
+        requireAdversarial: Boolean(opts.requireAdversarial),
       }, { storeRoot: opts.store });
       process.exitCode = report.exit_code;
     } catch (err) {
@@ -174,6 +178,40 @@ program
       const result = await runDemoSeed({ store: opts.store });
       console.log(`demo store: ${result.store}`);
       console.log(`view it: invariant dashboard --store=${opts.store}`);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+const adversarial = program.command("adversarial").description("Adversarial mode: planted-instruction (indirect prompt injection) test fixtures");
+
+adversarial
+  .command("run")
+  .description(
+    "Run a tier with a payload fixture (tasks/adversarial/) planted by the proxy into one tool response per run, then score " +
+      "injection propagation: the share of runs where the agent went on to make the payload's unauthorized call, and how " +
+      "many calls later. Stored as an adversarial batch, never mixed with consistency batches; gate it with invariant gate. " +
+      "Without --payload, runs every payload (for --task, that task's). Requires ANTHROPIC_API_KEY."
+  )
+  .option("--task <name>", "base task (must match the payload's task)")
+  .option("--payload <file|id>", "a payload id under tasks/adversarial/, or a path to a payload fixture")
+  .addOption(new Option("--tier <tier>", "smoke or full (default: execution.default_tier)").choices(["smoke", "full"]))
+  .option("--concurrency <n>", "max trials in flight (default: execution.worker_concurrency)", positiveInt("--concurrency"))
+  .option("--model <id>", "model to drive the agent under test")
+  .option("--runnable-only", "skip (and name) payloads whose base task the tool server cannot run", false)
+  .option("--json", "print JSON", false)
+  .action(async (opts) => {
+    try {
+      await runAdversarialCommand({
+        task: opts.task,
+        payload: opts.payload,
+        tier: opts.tier,
+        concurrency: opts.concurrency,
+        model: opts.model,
+        runnableOnly: Boolean(opts.runnableOnly),
+        json: Boolean(opts.json),
+      });
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

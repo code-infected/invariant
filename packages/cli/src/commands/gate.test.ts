@@ -175,7 +175,7 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
     assert.deepEqual(report.counts, { gated: 1, pass: 0, pass_with_waivers: 0, fail: 1, incomplete: 0, not_runnable: 2 });
 
     const saved = JSON.parse(fs.readFileSync(jsonFile, "utf8"));
-    assert.equal(saved.schema, "invariant.gate/v1");
+    assert.equal(saved.schema, "invariant.gate/v2");
     assert.equal(saved.exit_code, 1);
     const md = fs.readFileSync(mdFile, "utf8");
     assert.ok(md.startsWith(PR_COMMENT_MARKER + "\n"));

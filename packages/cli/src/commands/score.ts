@@ -19,6 +19,7 @@ import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { batchFingerprints, fingerprintLines, mixedFingerprintWarning, type BatchFingerprintSummary } from "../lib/fingerprints.js";
 import type { InvariantConfig } from "../schema/config.js";
+import { propagationJson, renderPropagationText, scoreAdversarialBatch } from "./adversarial.js";
 
 export interface ScoreOptions {
   /** Score this batch. */
@@ -218,6 +219,15 @@ export async function runScore(opts: ScoreOptions, deps: ScoreDeps = {}): Promis
   let stored: StoredScore;
   try {
     const { batch, task } = resolveBatch(store, opts);
+    if (batch.kind === "adversarial") {
+      // An adversarial batch is scored for injection propagation only, never for consistency.
+      const sp = scoreAdversarialBatch(store, batch, { rescore: true });
+      for (const w of sp.warnings) err(`warning: ${w}`);
+      if (opts.json) out(JSON.stringify({ batch_id: batch.id, kind: "adversarial", ...propagationJson(sp) }, null, 2));
+      else for (const line of [...renderPropagationText(sp), "", "  Informational: `invariant gate` turns it into an exit code (3 on a security finding)."]) out(line);
+      if (sp.result.rate === null) process.exitCode = 1;
+      return;
+    }
     stored = await scoreStoredBatch(store, batch, task, config, deps);
   } finally {
     store.close();

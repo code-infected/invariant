@@ -36,5 +36,7 @@ execution:
   variants_smoke: 2
   variants_full: 8
 
+# Opts this task into adversarial mode: payload fixtures under tasks/adversarial/ that
+# target it can be run (invariant adversarial run) and are gated in the security section.
 adversarial:
-  enabled: false
+  enabled: true
