@@ -34,8 +34,9 @@ Working:
   attempt.
 
 - Scoring: `invariant score --batch=ID | --task=NAME` scores a batch on the three axes
-  independently and saves the scores. The outcome axis needs `ANTHROPIC_API_KEY` for its
-  judge; without it that axis is reported as not computed and the other two still score.
+  independently and saves the scores. The outcome axis needs its judge (`models.judge`) and
+  that provider's key; without it that axis is reported as not computed and the other two
+  still score.
 - A gate: `invariant gate` compares a batch's scores to the task's thresholds and exits
   0 (pass), 1 (an axis scored below its threshold), 2 (could not evaluate) or 3 (a
   security finding from adversarial mode), with a JSON report and a markdown one for a PR
@@ -48,10 +49,12 @@ Working:
 - A local, read-only dashboard (`invariant dashboard`): leaderboard, batch run matrix,
   trace diff, and a trend view with fingerprint changes marked. See "Dashboard" below.
 
-Verified so far with a scripted stand-in for the model (see `TrialDeps.callModel`), plus
-real-API runs with an invalid key to exercise the HTTP error path. No trial has run
-against a real model yet, and the workflow has been linted (actionlint + shellcheck) but
-has not run on GitHub yet. The scoring and gate proof points use a synthetic, clearly
+Verified so far with a scripted stand-in for the model (see `TrialDeps.callModel`), with
+every provider adapter against a local fake of its API (the real trial loop included), and
+once against a REAL small local model: Qwen2.5-1.5B-Instruct (Q4_K_M) on CPU through
+llama.cpp's OpenAI-compatible server (see "Model providers"). That is a smoke test of the
+harness against a real model, not a finding about any production model. The workflow has
+been linted (actionlint + shellcheck) but has not run on GitHub yet. The scoring and gate proof points use a synthetic, clearly
 labelled reproduction of the Princeton refund scenario (3 of 5 trials refund), not a
 model result.
 
@@ -68,9 +71,15 @@ say so rather than repeating phrasings.
 The dashboard has only ever displayed SYNTHETIC data (`invariant demo-seed`, scripted
 stand-in); it labels it as such on every page.
 
-Not built yet: the embedding pre-filter's embedder (every non-identical pair of answers goes
-to the judge), and any run against a real model. That needs `ANTHROPIC_API_KEY`, and it is
-the next step: every result above is a test of the harness, not a finding about a model.
+- Provider-agnostic model calls: Anthropic, OpenAI, Azure OpenAI, Gemini, Bedrock, and any
+  OpenAI-compatible server (presets for OpenRouter, Groq, Together, DeepSeek, Mistral, xAI,
+  Fireworks, Ollama, LM Studio, vLLM), for the agent, the judge, the paraphraser and the
+  embedding pre-filter. See "Model providers".
+
+The embedding pre-filter runs only when `models.embedder` is configured; otherwise every
+non-identical pair of answers goes to the judge, and the score says so. No hosted provider
+has been called with a real key yet: apart from the small local model run, every result
+above is a test of the harness, not a finding about a model.
 
 ## Layout
 
@@ -82,6 +91,7 @@ packages/toy-tool-server/   deterministic MCP tool servers for the three example
 packages/agent-driver/      drives trials: model tool-use loop via the proxy, fan-out, retry policy
 packages/scoring/           the three consistency axes, and the gate's threshold comparison
 packages/trace-store/       run/tool-call metadata + raw trace blobs (SQLite locally), deployment fingerprints
+packages/providers/         native provider adapters (Anthropic, OpenAI, Azure, Gemini, Bedrock, OpenAI-compatible)
 packages/dashboard/         read-only Next.js dashboard over the trace store
 packages/otel-export/       batches as OpenTelemetry traces over OTLP/HTTP
 adapters/langgraph/         Python adapter for LangGraph agents (writes trace files for `invariant ingest`)
@@ -97,7 +107,8 @@ npm run build                    # the packages import each other's build output
 npm test                         # all package tests, no API key needed
 npm run validate                 # validate every task spec + fixture
 
-export ANTHROPIC_API_KEY=...     # required: a trial calls a real model
+invariant doctor                 # what each model role resolves to, and whether its key is set
+export ANTHROPIC_API_KEY=...     # or the key of whichever provider invariant.config.yaml names
 npm run invariant -- run --task=refund-duplicate-check --tier=smoke
 npm run invariant -- run --task=refund-duplicate-check --variant=v1
 npm run invariant -- variants regen --task=refund-duplicate-check
@@ -127,6 +138,62 @@ server), gives the agent the proxy's tools, and writes the trace to `.invariant/
 `trace.db` for metadata, `traces/<run_id>.json` for the full raw trace. Add `--json` to
 print the whole record.
 
+### Model providers
+
+Every model call (the agent under test, the outcome judge, the paraphraser, and the optional
+embedder) is configured under `models:` in `invariant.config.yaml`:
+
+```yaml
+models:
+  agent:       { model: anthropic:claude-sonnet-4-5 }
+  judge:       { model: anthropic:claude-sonnet-4-5 }
+  paraphraser: { model: anthropic:claude-sonnet-4-5 }
+  # embedder:  { model: openai:text-embedding-3-small }
+```
+
+`model` is `provider:model`, split on the first colon (`ollama:qwen2.5:3b`). Optional per
+role: `base_url`, `api_key_env` (the NAME of the variable holding the key), `params`,
+`api_version` (azure), `region` (bedrock). `--model` overrides the agent (on `run`,
+`adversarial run`) or the paraphraser (`variants regen`); `--judge-model` overrides the
+judge on `score` and `gate`.
+
+Providers speak their native APIs through `packages/providers` (no SDK abstraction, no
+hidden retries, no request rewriting), because a measurement tool has to see exactly what
+the provider returned and must own the retry decision itself.
+
+| Provider | `model` | Key | Tested |
+|---|---|---|---|
+| `anthropic` | `anthropic:<id>` (Messages) | `ANTHROPIC_API_KEY` | fake API + real trial loop |
+| `openai` | `openai:<id>` (Chat Completions) | `OPENAI_API_KEY` | fake API + real trial loop |
+| `azure` | `azure:<deployment>` + `base_url`, optional `api_version` | `AZURE_OPENAI_API_KEY` | fake API + real trial loop |
+| `gemini` | `gemini:<id>` (generateContent) | `GOOGLE_API_KEY` or `GEMINI_API_KEY` (GOOGLE wins) | fake API + real trial loop |
+| `bedrock` | `bedrock:<modelId>`, optional `region` (Converse) | AWS credential chain | real AWS SDK vs fake endpoint + real trial loop |
+| `openai-compatible` | any Chat Completions server, `base_url` required | `api_key_env` if set | **live** (llama.cpp) + fake API |
+| presets | `openrouter` `groq` `together` `deepseek` `mistral` `xai` `fireworks` | `<NAME>_API_KEY` | preset resolution (groq: fake API) |
+| local presets | `ollama` `lmstudio` `vllm` | none (vllm: `VLLM_API_KEY` if set) | ollama: fake API + real trial loop |
+
+Preset URLs and key variables were checked against each provider's docs (sources in
+`packages/providers/src/registry.ts`). Vertex AI is not supported.
+
+Nothing is set on the agent under test unless `models.agent.params` says so, and the
+parameters actually sent are recorded in each raw trace. The judge runs at temperature 0
+with a majority of 3; if its model refuses temperature, the judge retries without it and
+the score and reports say `temperature: unsupported`. Rate limits and overloads (HTTP
+429/5xx, Gemini RESOURCE_EXHAUSTED, Bedrock ThrottlingException) are infra failures under
+`providers.retry`, which also accepts provider error codes by name.
+
+`invariant doctor` lists each role's provider, endpoint host and whether its key is set
+(the key itself is never printed); `--ping` makes one minimal live call per role and
+reports the model id the provider returned and the latency.
+
+The one real-model run so far: Qwen2.5-1.5B-Instruct on CPU via llama.cpp, as
+`openai-compatible`. On `refund-duplicate-check`, a single v1 trial refunded without
+checking history (sandboxed, with an invented amount); a 2x2 smoke batch checked history and
+declined in all 4 runs (all three axes 1.000, outcome judged by the same small model). So
+v1 refunded in 1 of 3 runs across the two invocations. A tiny sample from a tiny model:
+evidence that the harness works against a real model, not a finding about any production
+model.
+
 ### Gate and CI
 
 `invariant gate --batch=ID | --task=NAME` gates one batch (for `--task`, that task's
@@ -146,7 +213,7 @@ always come from `tasks/<name>.yaml` as it is now.
 | 1 | `fail` | at least one scored axis is below its threshold (wins over a missing axis) |
 | 2 | `incomplete` | an axis has no score, a runnable task has no finished batch, bad arguments, ... |
 
-Missing scores fail closed. Without `ANTHROPIC_API_KEY` the outcome judge cannot run, and
+Missing scores fail closed. Without the judge's key (`models.judge`) the outcome judge cannot run, and
 a gate that passed anyway would be claiming a consistency nobody measured. Pass
 `--allow-uncomputed=outcome` to accept that explicitly: the verdict is then
 `pass_with_waivers`, never `pass`, and both reports say which axis went unchecked. Only
@@ -161,14 +228,18 @@ signature groups with the trials in each, the distinct tool paths, the outcome c
 The workflow runs `validate`, then `run --tier=... --runnable-only` (smoke on pull
 requests, full nightly and on manual dispatch), then `gate`, uploads the JSON report and
 the trace store as artifacts, and posts one PR comment that later runs edit in place. It
-needs the `ANTHROPIC_API_KEY` repository secret; without it (including every pull request
-from a fork, which never gets secrets) the job fails with a message saying so.
+first runs `invariant doctor --roles=agent,judge`, so it needs the repository secrets of the
+providers `models.agent` and `models.judge` name (the common provider secrets are passed
+through; a role using `api_key_env` needs that secret added to the workflow). Without them,
+including every pull request from a fork, which never gets secrets, the job fails with a
+message saying so.
 
 ### Deployment fingerprints
 
 A run's fingerprint is recorded on its first model response, the first moment every
-component is known: the model id requested, the model id the API reported (an alias can
-move to a new snapshot with nothing changing on the harness side), the system prompt, and
+component is known: the provider and endpoint host, the model id requested, the model id the API reported (an alias can
+move to a new snapshot with nothing changing on the harness side; Bedrock Converse reports
+none), the system prompt, and
 the tool list exactly as the proxy exposed it (name, description, input schema). Object
 keys are canonicalised before hashing, so key order never changes the hash; array order,
 including the order of the tool list, is kept, because the model sees it. The components
@@ -184,6 +255,11 @@ A batch whose runs carry more than one fingerprint (the deployment changed mid-b
 flagged by `invariant score` and `invariant gate` (in the text reports, the JSON report's
 `warnings` and `batch.deployment`, and the PR comment). It is a warning, not a gate
 failure: the scores are still computed, they just partly measure the deploy change.
+
+Provider and endpoint were added in fingerprint formula v2. Fingerprints recorded earlier
+(v1) keep their hashes and show provider and endpoint as not recorded; when a task moves from
+a v1 to a v2 fingerprint with every recorded component equal, `score`, `gate` and the
+dashboard report a formula change, not a deployment change.
 
 ### Dashboard
 
@@ -318,12 +394,23 @@ format is `schemas/trial-trace.v1.schema.json`, generated from the Zod schema in
 `packages/cli/src/schema/trial-trace.ts`; both sides validate against it.
 
     cd adapters/langgraph && python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-    export ANTHROPIC_API_KEY=...        # real mode (langchain-anthropic)
     invariant-langgraph run --task refund-duplicate-check --tier smoke \
       --graph invariant_langgraph.examples.refund:build_graph \
-      --tools invariant_langgraph.examples.refund:make_tools --out traces/
+      --tools invariant_langgraph.examples.refund:make_tools \
+      --model openai:gpt-4.1 --out traces/
     invariant ingest --task=refund-duplicate-check --tier=smoke traces/
     invariant score --task=refund-duplicate-check
+
+`--model provider:model` uses the same syntax and provider names as the TypeScript CLI.
+Without it the default is `anthropic:claude-sonnet-4-5` (a default, not a requirement).
+Provider packages are optional extras: `[anthropic]`, `[openai]` (also azure and every
+OpenAI-compatible preset), `[gemini]`, `[bedrock]`, `[all]`. A missing extra or key is refused
+before any trial runs, naming the install command or the variable. `--base-url` and
+`--api-key-env` override the endpoint and key; `--param key=value` sets sampling params
+(nothing is sent otherwise). Every client runs with retries off, so a provider failure becomes
+that cell's `infra_error`, classified per provider. Each trace records the provider, the
+endpoint host (never keys), the model requested and the model the provider reported (or "not
+reported"; Bedrock never reports one).
 
 Your graph is a factory `factory(tools, model) -> compiled graph` over `{"messages": [...]}`;
 `--tools` is a list of tools or a zero-argument callable returning one (called per trial).
@@ -339,7 +426,9 @@ commit.
 
 Limits: cells run sequentially; no infra retries (a provider failure is recorded as that cell's
 infra_error and excluded from scoring); recording uses LangGraph's callback system, not its
-checkpointer.
+checkpointer; the sampling params sent are logged to stderr but not yet stored in the trace
+file; no run against a real provider has been done from the Python adapter yet (its provider
+tests use a local fake of each provider's wire format).
 
 ### How the instrumentation works
 

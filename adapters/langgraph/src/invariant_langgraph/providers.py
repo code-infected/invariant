@@ -211,7 +211,7 @@ def build_model_factory(
         if api_key_env:
             key = _key(env, api_key_env, provider)
         else:
-            key = env.get("GEMINI_API_KEY") or env.get("GOOGLE_API_KEY")
+            key = env.get("GOOGLE_API_KEY") or env.get("GEMINI_API_KEY")  # Google: GOOGLE_API_KEY wins when both are set
             if not key:
                 raise _missing("GEMINI_API_KEY", provider, "API key (GOOGLE_API_KEY is also accepted)")
         url = base_url or DEFAULT_BASE_URLS["gemini"]
