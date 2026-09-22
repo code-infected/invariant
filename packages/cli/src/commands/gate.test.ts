@@ -21,6 +21,9 @@ import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { runGate, PR_COMMENT_MARKER, type EvaluatedTaskReport, type GateDeps, type GateOptions, type StateMutationEvidence } from "./gate.js";
 import { consistentDeclineScript, writePrincetonBatch, writeScriptedBatch } from "./princeton-fixture.js";
 import { syncTask } from "./run.js";
+import { writeCodeCleanupBatch } from "./code-cleanup-fixture.js";
+import { writeResearchBatch } from "./research-fixture.js";
+import { upstreamForTask } from "../lib/upstream.js";
 
 /** Same rule-based stand-in as score.test.ts: "same outcome" iff both or neither say a refund was issued. */
 const refundIssued = (s: string) => /(issued|processed|has been processed)/i.test(s) && !/already/i.test(s);
@@ -38,7 +41,7 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
   let store: TraceStore;
   let task: LoadedTask;
   let savedKey: string | undefined;
-  const batches = { identical: "", reworded: "", princeton: "" };
+  const batches = { identical: "", reworded: "", princeton: "", code: "", research: "" };
 
   async function gate(opts: Partial<GateOptions>, deps: GateDeps = {}) {
     const lines: string[] = [];
@@ -57,6 +60,8 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
     batches.identical = (await writeScriptedBatch(store, task, consistentDeclineScript("identical"), 5)).batch_id;
     batches.reworded = (await writeScriptedBatch(store, task, consistentDeclineScript("reworded"), 5)).batch_id;
     batches.princeton = (await writePrincetonBatch(store, task)).batch_id;
+    batches.code = (await writeCodeCleanupBatch(store, loadValidTask("code-agent-destructive-command"))).batch_id;
+    batches.research = (await writeResearchBatch(store, loadValidTask("research-citation-integrity"))).batch_id;
   });
 
   after(() => {
@@ -155,7 +160,7 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
     assert.equal(only(judged.report).axes[2]!.score, 1);
   });
 
-  test("all tasks: gates each task's latest batch, lists the tasks the tool server cannot run as not gated", async () => {
+  test("all tasks: gates each task's latest batch against its own tool server", async () => {
     const jsonFile = path.join(root, "out", "report.json");
     const mdFile = path.join(root, "out", "report.md");
     const { report, lines } = await gate({ report: jsonFile, markdown: mdFile });
@@ -163,16 +168,19 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
     assert.equal(report.exit_code, 1);
     assert.equal(report.verdict, "fail");
     assert.deepEqual(
-      report.tasks.map((t) => [t.task, t.status]),
+      report.tasks.map((t) => [t.task, t.status, t.verdict]),
       [
-        ["code-agent-destructive-command", "not_runnable"],
-        ["refund-duplicate-check", "evaluated"],
-        ["research-citation-integrity", "not_runnable"],
+        ["code-agent-destructive-command", "evaluated", "fail"],
+        ["refund-duplicate-check", "evaluated", "fail"],
+        ["research-citation-integrity", "evaluated", "pass"],
       ]
     );
-    const refund = report.tasks.find((t) => t.status === "evaluated") as EvaluatedTaskReport;
-    assert.equal(refund.batch.id, batches.princeton);
-    assert.deepEqual(report.counts, { gated: 1, pass: 0, pass_with_waivers: 0, fail: 1, incomplete: 0, not_runnable: 2 });
+    const byTask = (name: string) => report.tasks.find((t) => t.task === name) as EvaluatedTaskReport;
+    assert.equal(byTask("refund-duplicate-check").batch.id, batches.princeton);
+    assert.equal(byTask("code-agent-destructive-command").batch.id, batches.code);
+    assert.deepEqual(byTask("code-agent-destructive-command").failing_axes.map((f) => f.axis), ["state_mutation", "tool_path"]);
+    assert.equal(byTask("research-citation-integrity").batch.id, batches.research);
+    assert.deepEqual(report.counts, { gated: 3, pass: 1, pass_with_waivers: 0, fail: 2, incomplete: 0, not_runnable: 0 });
 
     const saved = JSON.parse(fs.readFileSync(jsonFile, "utf8"));
     assert.equal(saved.schema, "invariant.gate/v1");
@@ -181,10 +189,32 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
     assert.ok(md.startsWith(PR_COMMENT_MARKER + "\n"));
     assert.match(md, /## invariant gate: FAIL/);
     assert.match(md, /\*\*state-mutation failed: 0\.600 < 1\.000\*\*/);
-    assert.match(md, /### Not gated/);
-    assert.match(md, /`code-agent-destructive-command`: not gated: the tool server/);
+    assert.doesNotMatch(md, /### Not gated/);
     show(lines);
     if (process.env.INVARIANT_SHOW_REPORT) console.log(md);
+  });
+
+  test("all tasks: a task with no tool server, or one lacking its tools, is listed as not gated", async () => {
+    const mdFile = path.join(root, "out", "not-runnable.md");
+    // Pretend the registry lost the code task and pointed research at the refund server.
+    const upstreamFor = (name: string) =>
+      name === "code-agent-destructive-command" ? null : upstreamForTask(name === "research-citation-integrity" ? "refund-duplicate-check" : name);
+    const { report } = await gate({ markdown: mdFile }, { upstreamFor });
+    assert.deepEqual(
+      report.tasks.map((t) => [t.task, t.status]),
+      [
+        ["code-agent-destructive-command", "not_runnable"],
+        ["refund-duplicate-check", "evaluated"],
+        ["research-citation-integrity", "not_runnable"],
+      ]
+    );
+    assert.deepEqual(report.counts, { gated: 1, pass: 0, pass_with_waivers: 0, fail: 1, incomplete: 0, not_runnable: 2 });
+    const reasons = Object.fromEntries(report.tasks.map((t) => [t.task, (t as { reason?: string }).reason ?? ""]));
+    assert.match(reasons["code-agent-destructive-command"]!, /no tool server is registered/);
+    assert.match(reasons["research-citation-integrity"]!, /toy-refund .* and not \[search_web, fetch_page, summarize\]/);
+    const md = fs.readFileSync(mdFile, "utf8");
+    assert.match(md, /### Not gated/);
+    assert.match(md, /`code-agent-destructive-command`: not gated: no tool server is registered/);
   });
 
   test("could-not-evaluate cases exit 2: no batch for a runnable task, unfinished latest batch, unrunnable --task", async () => {
@@ -207,9 +237,9 @@ describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live mod
       empty.close();
     }
 
-    const unrunnable = await gate({ task: "code-agent-destructive-command" });
-    assert.equal(unrunnable.report.exit_code, 2);
-    assert.equal(unrunnable.report.tasks[0]!.status, "error");
+    const neverRun = await runGate({ json: false, task: "code-agent-destructive-command" }, { storeRoot: emptyRoot, out: () => {} });
+    assert.equal(neverRun.exit_code, 2);
+    assert.equal(neverRun.tasks[0]!.status, "error");
 
     await assert.rejects(gate({ batch: batches.princeton, allowUncomputed: ["state_mutation"] }), /only \[outcome\] may be waived/);
     await assert.rejects(gate({ batch: batches.princeton, task: "refund-duplicate-check" }), /at most one of/);

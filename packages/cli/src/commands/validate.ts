@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { parseConfig } from "../lib/config.js";
 import { loadAllTasks } from "../lib/load-tasks.js";
 import { CONFIG_PATH } from "../lib/paths.js";
+import { upstreamForTask } from "../lib/upstream.js";
 
 export function runValidate(): void {
   const tasks = loadAllTasks();
@@ -16,6 +17,11 @@ export function runValidate(): void {
   for (const task of tasks) {
     const hard = task.errors.filter((e) => !e.startsWith("warning:"));
     const warnings = task.errors.filter((e) => e.startsWith("warning:"));
+    // Only whether a server is registered; whether it serves the task's tools needs the
+    // server running, which `invariant run` checks before any model call.
+    if (upstreamForTask(task.name) === null) {
+      warnings.push("warning: no tool server is registered for this task (packages/cli/src/lib/upstream.ts), so invariant run will refuse it.");
+    }
 
     if (hard.length === 0) {
       console.log(`OK    ${task.name}`);

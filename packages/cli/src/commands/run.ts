@@ -8,12 +8,12 @@ import {
   type BatchSummary,
   type TrialPlan,
 } from "@invariant/agent-driver";
-import type { UpstreamConfig } from "@invariant/mcp-proxy";
 import { loadConfig } from "../lib/config.js";
 import { loadAllTasks, loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { selectTier, type Tier } from "../lib/tier.js";
-import { defaultUpstream, describeUpstream, toolCoverage } from "../lib/upstream.js";
+import { planForExport, sendPlans } from "./export.js";
+import { describeGap, describeUpstream, requireUpstream, toolCoverage } from "../lib/upstream.js";
 
 export interface RunOptions {
   /** Required with --variant; with a tier, omitted means every task under tasks/. */
@@ -28,11 +28,19 @@ export interface RunOptions {
   concurrency?: number;
   model?: string;
   /**
-   * Tier runs only: skip (and name) tasks whose declared tools the upstream does not
-   * serve, instead of refusing the whole run. For CI, where only some example tasks have
-   * a tool server yet. `gate` reports the skipped tasks as not gated.
+   * Tier runs only: skip (and name) tasks with no registered tool server, or whose server
+   * does not serve their declared tools, instead of refusing the whole run. `gate` reports
+   * the skipped tasks as not gated.
    */
   runnableOnly?: boolean;
+  /**
+   * Tier runs only: export each finished batch as an OpenTelemetry trace afterwards (same
+   * as `invariant export --batch=<id>`). A batch is not scored yet at this point, so its
+   * trace carries no axis results; export again after `invariant score` to include them.
+   */
+  otel?: boolean;
+  /** OTLP endpoint for --otel; see `invariant export`. */
+  otelEndpoint?: string;
   json: boolean;
 }
 
@@ -42,6 +50,7 @@ export async function runRun(opts: RunOptions): Promise<void> {
     if (opts.concurrency !== undefined) throw new Error("--concurrency only applies to a tier run, not a single --variant trial.");
     if (opts.task === undefined) throw new Error("--variant needs --task.");
     if (opts.runnableOnly) throw new Error("--runnable-only applies to a tier run, not a single --variant trial.");
+    if (opts.otel) throw new Error("--otel exports a tier run's batches; a single --variant trial has no batch to export.");
     return runSingle(opts.task, opts.variant, opts.trial ?? 1, opts);
   }
   if (opts.trial !== undefined) throw new Error("--trial only applies with --variant; a tier run numbers its own trials.");
@@ -50,31 +59,23 @@ export async function runRun(opts: RunOptions): Promise<void> {
 
 
 /**
- * Refuse to run tasks whose declared tools the upstream does not serve (see toolCoverage).
- * Today there is one upstream (the toy refund server), so this is what stops the two
- * non-refund example tasks from being run against refund tools. Checked once, before any
- * model call. With `skipUnrunnable`, those tasks are dropped with a notice instead, and
- * only an empty remainder is an error.
+ * Refuse to run tasks that have no registered tool server, or whose server does not serve
+ * every tool the task declares (see toolCoverage). Checked once, before any model call.
+ * With `skipUnrunnable`, those tasks are dropped with a notice instead, and only an empty
+ * remainder is an error.
  */
-async function preflightTools(
-  tasks: LoadedTask[],
-  upstream: UpstreamConfig,
-  options: { skipUnrunnable?: boolean } = {}
-): Promise<LoadedTask[]> {
-  const { served, missing } = await toolCoverage(tasks, upstream);
-  if (missing.size === 0) return tasks;
-  const problems = [...missing].map(([name, gap]) => `${name}: upstream does not serve [${gap.join(", ")}]`);
+async function preflightTools(tasks: LoadedTask[], options: { skipUnrunnable?: boolean } = {}): Promise<LoadedTask[]> {
+  const gaps = await toolCoverage(tasks);
+  if (gaps.size === 0) return tasks;
+  const problems = [...gaps].map(([name, gap]) => `${name}: ${describeGap(gap)}`);
   if (options.skipUnrunnable) {
-    const runnable = tasks.filter((t) => !missing.has(t.spec.name));
+    const runnable = tasks.filter((t) => !gaps.has(t.spec.name));
     for (const p of problems) console.error(`skipping ${p} (--runnable-only); it will not be run or gated`);
-    if (runnable.length === 0) {
-      throw new Error(`--runnable-only: no task left to run; the tool server (${describeUpstream(upstream)}) serves [${served.join(", ")}].`);
-    }
+    if (runnable.length === 0) throw new Error(`--runnable-only: no task left to run.`);
     return runnable;
   }
   throw new Error(
-    `refusing to run: the tool server (${describeUpstream(upstream)}) serves ` +
-      `[${served.join(", ")}], which does not cover every tool these tasks declare:\n` +
+    `refusing to run: not every task has a tool server that serves the tools it declares:\n` +
       problems.map((p) => `  - ${p}`).join("\n") +
       `\nThe agent would be given the wrong tools and its traces would measure nothing. ` +
       `Pass --runnable-only to run the rest and skip these.`
@@ -130,8 +131,8 @@ async function runSingle(taskName: string, variantLabel: string, trial: number, 
         `Available: ${fixture.variants.map((v) => v.id).join(", ")}`
     );
   }
-  const upstream = defaultUpstream();
-  await preflightTools([task], upstream);
+  await preflightTools([task]);
+  const { server, upstream } = requireUpstream(task.spec.name);
 
   const store = openTraceStore({ root: INVARIANT_DIR });
   try {
@@ -151,6 +152,7 @@ async function runSingle(taskName: string, variantLabel: string, trial: number, 
     };
 
     console.log(`Running ${task.spec.name} / variant ${variant.id} / trial ${trial}`);
+    console.log(`  tools : ${server} (${describeUpstream(upstream)})`);
     console.log(`  prompt: ${variant.text}`);
     console.log("");
 
@@ -191,20 +193,20 @@ async function runTier(opts: RunOptions): Promise<void> {
   const requested = opts.task !== undefined ? [loadValidTask(opts.task)] : loadAllTasks().map((t) => loadValidTask(t.name));
   if (requested.length === 0) throw new Error("no task specs under tasks/, nothing to run.");
 
-  const upstream = defaultUpstream();
-  const tasks = await preflightTools(requested, upstream, { skipUnrunnable: opts.runnableOnly });
+  const tasks = await preflightTools(requested, { skipUnrunnable: opts.runnableOnly });
 
   const store = openTraceStore({ root: INVARIANT_DIR });
   const summaries: BatchSummary[] = [];
   try {
     for (const task of tasks) {
       const selection = selectTier(task.spec, task.fixture!, tier);
+      const { server, upstream } = requireUpstream(task.spec.name);
       const { taskId, variantIds } = syncTask(store, task, selection.variants);
 
       console.error(
         `${task.spec.name}: ${tier} tier, ${selection.variants.length} variant(s) x ${selection.trials} trial(s) = ` +
           `${selection.variants.length * selection.trials} runs, concurrency ${concurrency}, ` +
-          `up to ${retry.max_attempts} attempt(s) per run on [${retry.retry_on.join(", ")}]`
+          `up to ${retry.max_attempts} attempt(s) per run on [${retry.retry_on.join(", ")}], tool server ${server}`
       );
       if (selection.shortfall > 0) {
         console.error(
@@ -253,6 +255,23 @@ async function runTier(opts: RunOptions): Promise<void> {
 
   if (summaries.some((s) => s.counts.infra_exhausted + s.counts.errors > 0)) {
     process.exitCode = 1;
+  }
+
+  if (opts.otel && summaries.length > 0) {
+    try {
+      const reader = openTraceStore({ root: INVARIANT_DIR, readonly: true });
+      let plans;
+      try {
+        plans = summaries.map((s) => planForExport(reader, reader.getBatch(s.batch_id)!));
+      } finally {
+        reader.close();
+      }
+      const sent = await sendPlans(plans, { endpoint: opts.otelEndpoint }, {});
+      for (const p of plans) console.error(`exported batch ${p.batchId} as trace ${p.traceId} to ${sent.url} (unscored: run invariant score, then invariant export, to add axis results)`);
+    } catch (err) {
+      console.error(`--otel: export failed: ${(err as Error).message}`);
+      process.exitCode = 1;
+    }
   }
 }
 

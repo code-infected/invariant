@@ -7,11 +7,14 @@ import { thresholdsFor, verdictFor, worstMargin } from "./scores";
  * scored            latest finished batch has a stored score
  * unscored          latest finished batch exists but nobody ran `invariant score` on it
  * no_finished_batch batches exist, none finished
- * no_batch          the spec exists, the store has never run it (and its tools are served, or we cannot tell)
- * not_runnable      the tool server recorded in the store does not serve this task's tools
+ * no_batch          the spec exists, the store has never run it
  * spec_error        tasks/<name>.yaml does not parse
+ *
+ * Whether a never-run task could run is not the store's to say: each task has its own
+ * tool server (the CLI's registry, packages/cli/src/lib/upstream.ts), which the store does
+ * not record. `invariant run` and `invariant gate` check that; the dashboard does not guess.
  */
-export type RowState = "scored" | "unscored" | "no_finished_batch" | "no_batch" | "not_runnable" | "spec_error";
+export type RowState = "scored" | "unscored" | "no_finished_batch" | "no_batch" | "spec_error";
 
 export interface LeaderRow {
   task: string;
@@ -30,30 +33,7 @@ export interface LeaderRow {
   deployment: BatchDeployment | null;
   synthetic: boolean;
   worst_margin: number | null;
-  missing_tools: string[];
   note: string | null;
-}
-
-export interface ServedTools {
-  tools: string[];
-  /** The fingerprint whose tool schema this list comes from, and when it was first seen. */
-  fingerprint: string;
-  seen_at: string;
-}
-
-/** The tool list the proxy most recently exposed, as recorded in the newest fingerprint. */
-export function servedTools(store: TraceStore): ServedTools | null {
-  const fps = store.listDeploymentFingerprints();
-  const latest = fps[fps.length - 1];
-  if (!latest) return null;
-  try {
-    const tools = (JSON.parse(latest.tool_schema_json) as Array<{ name?: unknown }>)
-      .map((t) => t.name)
-      .filter((n): n is string => typeof n === "string");
-    return { tools, fingerprint: latest.hash, seen_at: latest.first_seen_at };
-  } catch {
-    return null;
-  }
 }
 
 const STATE_RANK: Record<RowState, number> = {
@@ -62,7 +42,6 @@ const STATE_RANK: Record<RowState, number> = {
   no_finished_batch: 2,
   no_batch: 3,
   spec_error: 4,
-  not_runnable: 5,
 };
 const VERDICT_RANK: Record<GateVerdict, number> = { fail: 0, incomplete: 1, pass_with_waivers: 2, pass: 3 };
 
@@ -92,14 +71,12 @@ function emptyRow(task: string, state: RowState): LeaderRow {
     deployment: null,
     synthetic: false,
     worst_margin: null,
-    missing_tools: [],
     note: null,
   };
 }
 
 /** Every task in the store or under tasks/, with its latest finished batch. */
-export function buildLeaderboard(store: TraceStore | null, specs: TaskSpecLite[]): { rows: LeaderRow[]; served: ServedTools | null } {
-  const served = store ? servedTools(store) : null;
+export function buildLeaderboard(store: TraceStore | null, specs: TaskSpecLite[]): { rows: LeaderRow[] } {
   const specByName = new Map(specs.map((s) => [s.name, s]));
   const rows: LeaderRow[] = [];
   const seen = new Set<string>();
@@ -139,7 +116,6 @@ export function buildLeaderboard(store: TraceStore | null, specs: TaskSpecLite[]
       deployment,
       synthetic: deployment.fingerprints.some((f) => f.synthetic),
       worst_margin: v ? worstMargin(v.axes) : null,
-      missing_tools: [],
       note: score && !th ? "no thresholds found (neither tasks/ nor the stored copy)" : null,
     });
   }
@@ -152,13 +128,11 @@ export function buildLeaderboard(store: TraceStore | null, specs: TaskSpecLite[]
       rows.push(row);
       continue;
     }
-    const missing = served ? spec.allowed_tools.filter((t) => !served.tools.includes(t)) : [];
-    const row = emptyRow(spec.name, missing.length ? "not_runnable" : "no_batch");
-    row.missing_tools = missing;
+    const row = emptyRow(spec.name, "no_batch");
     row.thresholds_source = spec.thresholds ? spec.file : null;
     rows.push(row);
   }
 
   rows.sort(compareRows);
-  return { rows, served };
+  return { rows };
 }

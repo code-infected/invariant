@@ -9,6 +9,7 @@ import { runGate } from "./commands/gate.js";
 import { runDemoSeed } from "./commands/demo-seed.js";
 import { runDashboard } from "./commands/dashboard.js";
 import { runIngest } from "./commands/ingest.js";
+import { runExport } from "./commands/export.js";
 
 const program = new Command();
 
@@ -62,6 +63,8 @@ program
     false
   )
   .option("--json", "print JSON: the full trace record for --variant, the batch summary for a tier", false)
+  .option("--otel", "tier runs: export each batch as an OpenTelemetry trace afterwards (unscored; see invariant export)", false)
+  .option("--otel-endpoint <url>", "OTLP/HTTP endpoint for --otel (default: as for invariant export)")
   .action(async (opts) => {
     try {
       await runRun({
@@ -72,6 +75,8 @@ program
         concurrency: opts.concurrency,
         model: opts.model,
         runnableOnly: Boolean(opts.runnableOnly),
+        otel: Boolean(opts.otel),
+        otelEndpoint: opts.otelEndpoint,
         json: Boolean(opts.json),
       });
     } catch (err) {
@@ -162,6 +167,32 @@ program
   .action((paths: string[], opts) => {
     try {
       runIngest({ task: opts.task, tier: opts.tier, paths, json: Boolean(opts.json) }, { storeRoot: opts.store });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("export")
+  .description(
+    "Export a stored batch as an OpenTelemetry trace over OTLP/HTTP: one trace per batch, a span per run, a child " +
+      "span per tool call (sandboxed ones marked), the latest stored score as attributes and events on the batch span. " +
+      "Reads the trace store after the fact; span times are the recorded ones. Endpoint: --endpoint, else " +
+      "OTEL_EXPORTER_OTLP_ENDPOINT, else export.otel_endpoint in invariant.config.yaml, else http://localhost:4318."
+  )
+  .option("--batch <id>", "the batch to export")
+  .option("--task <name>", "export this task's latest finished batch")
+  .option("--endpoint <url>", "OTLP/HTTP base URL (e.g. http://localhost:4318) or full .../v1/traces URL")
+  .option("--dry-run", "print the span tree that would be sent, send nothing", false)
+  .option("--json", "print a JSON summary", false)
+  .option("--store <path>", "trace store directory holding trace.db (default: .invariant at the repo root)")
+  .action(async (opts) => {
+    try {
+      await runExport(
+        { batch: opts.batch, task: opts.task, endpoint: opts.endpoint, dryRun: Boolean(opts.dryRun), json: Boolean(opts.json) },
+        { storeRoot: opts.store }
+      );
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

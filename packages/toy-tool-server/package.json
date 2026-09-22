@@ -14,7 +14,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/bin.js"
+    "start": "node dist/bin.js",
+    "test": "node --test \"dist/**/*.test.js\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

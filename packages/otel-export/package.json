@@ -1,0 +1,29 @@
+{
+  "name": "@invariant/otel-export",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test \"dist/**/*.test.js\""
+  },
+  "dependencies": {
+    "@invariant/scoring": "*",
+    "@invariant/trace-store": "*",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/core": "^2.11.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.222.0",
+    "@opentelemetry/resources": "^2.11.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
+    "@opentelemetry/semantic-conventions": "^1.43.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "typescript": "^5.5.4"
+  }
+}

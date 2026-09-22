@@ -51,8 +51,9 @@
  *       "notes": [string]
  *     },
  *     { "task", "status": "not_runnable", "verdict": null,           not gated, and says so:
- *       "reason", "missing_tools": [name] },                          the tool server does not
- *                                                                     serve this task's tools
+ *       "reason", "missing_tools": [name] },                          no tool server is registered
+ *                                                                     for it, or its server does
+ *                                                                     not serve this task's tools
  *     { "task", "status": "error", "verdict": "incomplete", "reason" }
  *   ]
  * }
@@ -79,11 +80,10 @@ import {
   type BatchScore,
   type GateVerdict,
 } from "@invariant/scoring";
-import type { UpstreamConfig } from "@invariant/mcp-proxy";
 import { loadConfig } from "../lib/config.js";
 import { loadAllTasks, loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR } from "../lib/paths.js";
-import { defaultUpstream, describeUpstream, toolCoverage } from "../lib/upstream.js";
+import { describeGap, toolCoverage, type CoverageGap, type UpstreamResolver } from "../lib/upstream.js";
 import { batchFingerprints, fingerprintLines, mixedFingerprintWarning, type BatchFingerprintSummary } from "../lib/fingerprints.js";
 import type { InvariantConfig } from "../schema/config.js";
 import {
@@ -119,8 +119,8 @@ export interface GateOptions {
 }
 
 export interface GateDeps extends ScoreDeps {
-  /** Tool server to check runnability against in all-task mode; defaults to the toy server. */
-  upstream?: UpstreamConfig;
+  /** Task -> tool server, for the runnability check in all-task mode; defaults to the registry. */
+  upstreamFor?: UpstreamResolver;
 }
 
 export interface StateMutationEvidence {
@@ -399,28 +399,25 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
           tasks.push(errorReport(t.name, err));
         }
       }
-      const upstream = deps.upstream ?? defaultUpstream();
-      let missing = new Map<string, string[]>();
-      let served: string[] = [];
+      let gaps = new Map<string, CoverageGap>();
       try {
-        ({ missing, served } = await toolCoverage(valid, upstream));
+        gaps = await toolCoverage(valid, deps.upstreamFor);
       } catch (err) {
         warnings.push(
-          `could not list the tool server's tools (${(err as Error).message}); treating every task as runnable, ` +
+          `could not list a tool server's tools (${(err as Error).message}); treating every task as runnable, ` +
             `so a task without a batch counts as incomplete.`
         );
       }
       for (const task of valid) {
-        const gap = missing.get(task.spec.name);
+        const gap = gaps.get(task.spec.name);
         if (gap) {
           tasks.push({
             task: task.spec.name,
             status: "not_runnable",
             verdict: null,
             reason:
-              `not gated: the tool server (${describeUpstream(upstream)}) serves [${served.join(", ")}] and not ` +
-              `[${gap.join(", ")}], so \`invariant run\` refuses this task. No consistency was measured for it.`,
-            missing_tools: gap,
+              `not gated: ${describeGap(gap)}, so \`invariant run\` refuses this task. No consistency was measured for it.`,
+            missing_tools: gap.missing,
           });
           continue;
         }

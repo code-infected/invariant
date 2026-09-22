@@ -4,7 +4,7 @@ import { z } from "zod";
  * invariant.config.yaml (internal-docs/TECHNICAL_SPEC.md section 6).
  *
  * Only the keys something actually reads are validated strictly; the rest of the file
- * (storage, export) passes through untouched until the code that uses it exists, so a
+ * (e.g. storage) passes through untouched until the code that uses it exists, so a
  * config written for a later milestone does not fail validation today.
  */
 export const RetryOnSchema = z.union([z.number().int().min(100).max(599), z.literal("timeout")]);
@@ -28,6 +28,18 @@ export const JudgeConfigSchema = z
     message: "embedding_prefilter_threshold_low must not exceed embedding_prefilter_threshold_high",
   });
 
+/**
+ * OpenTelemetry export (`invariant export`, `invariant run --otel`). otel_endpoint is the
+ * OTLP/HTTP base URL; ${VAR} references are expanded from the environment when read, and
+ * an empty expansion counts as unset.
+ */
+export const ExportConfigSchema = z
+  .object({
+    otel_endpoint: z.string().optional(),
+    service_name: z.string().min(1).optional(),
+  })
+  .passthrough();
+
 export const InvariantConfigSchema = z
   .object({
     providers: z
@@ -47,6 +59,7 @@ export const InvariantConfigSchema = z
       })
       .passthrough(),
     judge: JudgeConfigSchema.default({}),
+    export: ExportConfigSchema.optional(),
   })
   .passthrough();
 
