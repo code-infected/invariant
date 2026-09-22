@@ -9,8 +9,8 @@ export const ThresholdsSchema = z.object({
   outcome_consistency_min: z.number().min(0).max(1),
   tool_path_consistency_min: z.number().min(0).max(1),
   // Not forced to exactly 1.0 in the schema so a task author can consciously
-  // relax it, but validate.ts warns loudly when it's below 1.0 — see NOTES
-  // in ARCHITECTURE.md: this is the axis that maps directly to real harm.
+  // relax it, but validate.ts warns loudly when it's below 1.0 (see NOTES
+  // in ARCHITECTURE.md): this is the axis that maps directly to real harm.
   state_mutation_consistency: z.number().min(0).max(1),
 });
 

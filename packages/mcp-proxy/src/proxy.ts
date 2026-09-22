@@ -13,7 +13,7 @@ import { injectIntoResult } from "./inject.js";
 
 /**
  * One recorded tool call, shaped exactly like the trace schema in
- * internal-docs/TECHNICAL_SPEC.md section 3 (minus run_id, which the recorder owns —
+ * internal-docs/TECHNICAL_SPEC.md section 3 (minus run_id, which the recorder owns;
  * the proxy records for whichever run it was launched for and doesn't need to know it).
  */
 export interface ProxyToolCallRecord {
@@ -53,7 +53,7 @@ export interface ProxyOptions {
 /**
  * Unwrap an MCP tool result into the plain response value the trace schema records.
  *
- * TECHNICAL_SPEC section 3 shows `"response": {"status": "sandboxed", ...}` — the tool's
+ * TECHNICAL_SPEC section 3 shows `"response": {"status": "sandboxed", ...}`: the tool's
  * own payload, not the MCP content envelope around it. Nearly every tool server returns
  * a single JSON text block, so that case is unwrapped; anything else (multiple blocks,
  * images, non-JSON text, an error result) is recorded as the full envelope rather than

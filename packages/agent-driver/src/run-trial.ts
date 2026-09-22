@@ -79,7 +79,7 @@ export interface TrialPlan {
 export interface TrialDeps {
   store: TraceStore;
   apiKey?: string;
-  /** Progress lines. Never stdout by default — the caller decides where these go. */
+  /** Progress lines. Never stdout by default; the caller decides where these go. */
   log?: (message: string) => void;
   /**
    * Test seam. Replaces the Messages API call so the loop, the proxy wiring and the
