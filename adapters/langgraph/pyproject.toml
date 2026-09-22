@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "invariant-langgraph"
+version = "0.1.0"
+description = "Run a LangGraph agent through an invariant task and write trial trace files for `invariant ingest`."
+requires-python = ">=3.10"
+# Exact pins: the adapter hooks LangChain's callback and tool internals, and the trace it
+# writes is only as trustworthy as the versions it was tested against. Bump deliberately.
+dependencies = [
+  "langgraph==1.2.12",
+  "langchain-core==1.6.4",
+  "langchain-anthropic==1.7.2",
+  "jsonschema==4.26.0",
+  "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1"]
+
+[project.scripts]
+invariant-langgraph = "invariant_langgraph.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

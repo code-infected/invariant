@@ -1,0 +1,353 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:invariant:schema:trial-trace:v1",
+  "title": "invariant.trial-trace/v1",
+  "description": "One trial of one variant of an invariant task, written by an out-of-process adapter and imported with `invariant ingest`. GENERATED from packages/cli/src/schema/trial-trace.ts; do not edit by hand.",
+  "type": "object",
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "invariant.trial-trace/v1"
+    },
+    "adapter": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "e.g. invariant-langgraph"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "framework": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Versions of the agent framework packages the trial ran on"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "framework"
+      ],
+      "additionalProperties": false
+    },
+    "task": {
+      "type": "string",
+      "minLength": 1,
+      "description": "tasks/<task>.yaml"
+    },
+    "tier": {
+      "type": "string",
+      "enum": [
+        "smoke",
+        "full"
+      ]
+    },
+    "batch": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Adapter-chosen id shared by every file of one batch; ingest refuses to mix keys"
+        },
+        "trials_per_variant": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "variants_requested": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "variant_labels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "description": "Fixture labels the batch ran, in fixture order"
+        }
+      },
+      "required": [
+        "key",
+        "trials_per_variant",
+        "variants_requested",
+        "variant_labels"
+      ],
+      "additionalProperties": false
+    },
+    "variant": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The phrasing sent to the agent; must equal the fixture's text"
+        },
+        "fixture_version": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "text",
+        "fixture_version"
+      ],
+      "additionalProperties": false
+    },
+    "trial": {
+      "type": "integer",
+      "exclusiveMinimum": 0
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "timeout",
+        "infra_error"
+      ]
+    },
+    "stop_reason": {
+      "type": "string",
+      "enum": [
+        "reply_to_user",
+        "end_turn",
+        "max_turns",
+        "wall_clock_timeout",
+        "error"
+      ]
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "provider",
+                "provider_rejected",
+                "harness"
+              ]
+            },
+            "message": {
+              "type": "string"
+            },
+            "http_status": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "message"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "final_output": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp"
+    },
+    "latency_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "usage": {
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens"
+      ],
+      "additionalProperties": false
+    },
+    "fingerprint": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "model_name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The model id the adapter asked for"
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The model id the provider reported answering with"
+            },
+            "system_prompt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool_schema": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "input_schema": {
+                    "type": "object",
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "name",
+                  "description",
+                  "input_schema"
+                ],
+                "additionalProperties": false
+              },
+              "description": "The tools as exposed to the agent, in order"
+            }
+          },
+          "required": [
+            "model_name",
+            "model_version",
+            "system_prompt",
+            "tool_schema"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Deployment fingerprint components; null when no model response arrived. Ingest computes the hash."
+    },
+    "tool_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sequence_index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0-based order of the call within the run"
+          },
+          "tool_name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "args": {
+            "type": "object",
+            "additionalProperties": {},
+            "description": "Arguments exactly as the agent sent them, before any masking"
+          },
+          "response": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              },
+              {
+                "type": "array",
+                "items": {}
+              },
+              {
+                "type": "object",
+                "additionalProperties": {}
+              }
+            ],
+            "description": "What the tool returned: its JSON payload when the result was a single JSON text, the text otherwise. A failed call is recorded as {isError: true, content: [{type: 'text', text}]}, like an MCP error result."
+          },
+          "is_sandboxed": {
+            "type": "boolean",
+            "description": "True when the call was answered with the task's sandbox_response and the real tool never ran"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 timestamp"
+          }
+        },
+        "required": [
+          "sequence_index",
+          "tool_name",
+          "args",
+          "response",
+          "is_sandboxed",
+          "timestamp"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "messages": {
+      "type": "array",
+      "items": {},
+      "description": "Optional transcript, kept in the raw trace only"
+    }
+  },
+  "required": [
+    "format",
+    "adapter",
+    "task",
+    "tier",
+    "batch",
+    "variant",
+    "trial",
+    "status",
+    "stop_reason",
+    "error",
+    "final_output",
+    "started_at",
+    "finished_at",
+    "latency_ms",
+    "usage",
+    "fingerprint",
+    "tool_calls"
+  ],
+  "additionalProperties": false
+}
