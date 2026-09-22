@@ -108,3 +108,85 @@ describe("trace store batches", () => {
     }
   });
 });
+
+describe("trace store scores", () => {
+  test("an existing trace.db gains the scores table on open, and scores round-trip newest first", () => {
+    const root = tmpRoot();
+    try {
+      // A store as the fan-out milestone left it: no scores table.
+      const db = new Database(path.join(root, "trace.db"));
+      db.exec(`
+        create table tasks (id text primary key, name text unique not null, prompt_template text not null,
+          success_rubric text not null, forbidden_mutations text not null default '[]',
+          dangerous_tools text not null default '[]', volatile_fields text not null default '[]',
+          thresholds text not null, owner text, created_at text not null);
+        insert into tasks values ('t1','old','p','r','[]','[]','[]','{}',null,'2026-09-19T00:00:00Z');
+      `);
+      assert.equal(db.prepare("select name from sqlite_master where name = 'scores'").get(), undefined);
+      db.close();
+
+      const store = openTraceStore({ root });
+      try {
+        const batchId = store.createBatch({
+          task_id: "t1",
+          tier: "smoke",
+          trials_per_variant: 5,
+          variants_requested: 1,
+          variant_labels: ["v1"],
+        });
+        assert.deepEqual(store.getScores(batchId), []);
+        store.recordScore({
+          task_id: "t1",
+          evaluation_batch_id: batchId,
+          outcome_consistency: null,
+          tool_path_consistency: 0.75,
+          state_mutation_consistency: 0.6,
+          runs_scored: 5,
+          details: { note: "first" },
+        });
+        store.recordScore({
+          task_id: "t1",
+          evaluation_batch_id: batchId,
+          outcome_consistency: 0.6,
+          tool_path_consistency: 0.75,
+          state_mutation_consistency: 0.6,
+          injection_propagated: false,
+          runs_scored: 5,
+          details: { note: "second" },
+        });
+        const scores = store.getScores(batchId);
+        assert.equal(scores.length, 2);
+        assert.deepEqual(scores[0]!.details, { note: "second" });
+        assert.equal(scores[0]!.outcome_consistency, 0.6);
+        assert.equal(scores[0]!.injection_propagated, false);
+        assert.equal(scores[1]!.outcome_consistency, null);
+        assert.equal(scores[1]!.injection_propagated, null);
+        assert.equal(scores[1]!.state_mutation_consistency, 0.6);
+      } finally {
+        store.close();
+      }
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("latest batch per task, optionally only finished ones", async () => {
+    const root = tmpRoot();
+    const store = openTraceStore({ root });
+    try {
+      const { taskId } = seed(store);
+      const make = () =>
+        store.createBatch({ task_id: taskId, tier: "smoke", trials_per_variant: 1, variants_requested: 1, variant_labels: ["v1"] });
+      assert.equal(store.getLatestBatch(taskId), null);
+      const first = make();
+      store.finishBatch(first);
+      await new Promise((r) => setTimeout(r, 5)); // created_at is millisecond ISO time
+      const second = make();
+      assert.equal(store.getLatestBatch(taskId)!.id, second);
+      assert.equal(store.getLatestBatch(taskId, { finishedOnly: true })!.id, first);
+    } finally {
+      store.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

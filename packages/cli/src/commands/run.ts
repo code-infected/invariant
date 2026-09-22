@@ -12,7 +12,7 @@ import {
 } from "@invariant/agent-driver";
 import type { UpstreamConfig } from "@invariant/mcp-proxy";
 import { loadConfig } from "../lib/config.js";
-import { loadAllTasks, loadTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadAllTasks, loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { selectTier, type Tier } from "../lib/tier.js";
 
@@ -61,17 +61,6 @@ export async function runRun(opts: RunOptions): Promise<void> {
   return runTier(opts);
 }
 
-/** Load a task and refuse to go further if it does not validate. */
-function loadRunnableTask(name: string): LoadedTask {
-  const task = loadTask(name);
-  const hardErrors = task.errors.filter((e) => !e.startsWith("warning:"));
-  if (hardErrors.length > 0) {
-    throw new Error(
-      `task "${name}" is not valid, refusing to run it:\n` + hardErrors.map((e) => `  - ${e}`).join("\n")
-    );
-  }
-  return task;
-}
 
 /**
  * Refuse to run tasks whose declared tools the upstream does not serve.
@@ -102,7 +91,7 @@ async function preflightTools(tasks: LoadedTask[], upstream: UpstreamConfig): Pr
 }
 
 /** Upsert the task and the given fixture variants; returns the task id and label -> variant id. */
-function syncTask(
+export function syncTask(
   store: TraceStore,
   task: LoadedTask,
   variants: Array<{ id: string; text: string }>
@@ -141,7 +130,7 @@ async function runSingle(taskName: string, variantLabel: string, trial: number, 
   // Fail before touching the trace store, so a missing key does not leave a half-open run.
   requireApiKey();
 
-  const task = loadRunnableTask(taskName);
+  const task = loadValidTask(taskName);
   const fixture = task.fixture!;
   const variant = fixture.variants.find((v) => v.id === variantLabel);
   if (!variant) {
@@ -208,7 +197,7 @@ async function runTier(opts: RunOptions): Promise<void> {
   const concurrency = opts.concurrency ?? config.execution.worker_concurrency;
   const retry = config.providers.retry;
 
-  const tasks = opts.task !== undefined ? [loadRunnableTask(opts.task)] : loadAllTasks().map((t) => loadRunnableTask(t.name));
+  const tasks = opts.task !== undefined ? [loadValidTask(opts.task)] : loadAllTasks().map((t) => loadValidTask(t.name));
   if (tasks.length === 0) throw new Error("no task specs under tasks/, nothing to run.");
 
   const upstream = defaultUpstream();

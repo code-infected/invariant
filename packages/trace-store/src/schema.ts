@@ -27,9 +27,17 @@
  *     "runs where batch_id = ? and superseded = 0", one row per (variant, trial) cell.
  *     Single-trial debugging runs have batch_id null.
  *
- * The scores and deployment_fingerprints tables from section 7 are intentionally absent:
- * nothing computes scores or fingerprints yet, and creating empty tables ahead of the
- * code that fills them just invites them to drift from whatever that code ends up needing.
+ *   - scores follows the section 7 sketch, with evaluation_batch_id referencing batches
+ *     and two additions: runs_scored (the denominator, since runs without a behavioural
+ *     answer are excluded from scoring) and details (JSON: groups, clusters, judged
+ *     pairs, thresholds and verdicts, so a score can be explained after the fact without
+ *     re-running the judge). A score column is null when that axis could not be computed
+ *     (e.g. no judge key for the outcome axis) or had fewer than 2 runs. Scoring a batch
+ *     again appends a new row; the newest computed_at is the current one.
+ *
+ * The deployment_fingerprints table from section 7 is intentionally absent: nothing
+ * computes fingerprints yet, and creating an empty table ahead of the code that fills it
+ * just invites it to drift from whatever that code ends up needing.
  */
 export const SCHEMA_SQL = `
 create table if not exists tasks (
@@ -96,6 +104,20 @@ create table if not exists tool_calls (
   unique (run_id, sequence_index)
 );
 
+create table if not exists scores (
+  id                         text primary key,
+  task_id                    text not null references tasks(id),
+  evaluation_batch_id        text not null references batches(id),
+  outcome_consistency        real,
+  tool_path_consistency      real,
+  state_mutation_consistency real,
+  injection_propagated       integer,
+  runs_scored                integer not null,
+  details                    text not null default '{}',
+  computed_at                text not null
+);
+
+create index if not exists scores_batch_idx on scores (evaluation_batch_id, computed_at);
 create index if not exists tool_calls_run_idx on tool_calls (run_id, sequence_index);
 create index if not exists runs_task_idx on runs (task_id, variant_id, trial_number);
 `;

@@ -4,6 +4,7 @@ import { runValidate } from "./commands/validate.js";
 import { runInit } from "./commands/init.js";
 import { runVariantsRegen } from "./commands/variants-regen.js";
 import { runRun } from "./commands/run.js";
+import { runScore } from "./commands/score.js";
 
 const program = new Command();
 
@@ -63,6 +64,26 @@ program
         model: opts.model,
         json: Boolean(opts.json),
       });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+    }
+  });
+
+program
+  .command("score")
+  .description(
+    "Score one batch on the three consistency axes (state-mutation, tool-path, outcome) and show pass/fail " +
+      "per axis against the task's thresholds. Saves the scores to the trace store. The outcome axis asks an " +
+      "LLM judge and needs ANTHROPIC_API_KEY; the other two need no model. Exits nonzero only if an axis " +
+      "could not be scored, never because a score is below its threshold (that is the gate's job)."
+  )
+  .option("--batch <id>", "the batch to score (printed by invariant run --tier)")
+  .option("--task <name>", "score this task's most recent finished batch")
+  .option("--json", "print the full scoring result as JSON", false)
+  .action(async (opts) => {
+    try {
+      await runScore({ batch: opts.batch, task: opts.task, json: Boolean(opts.json) });
     } catch (err) {
       console.error((err as Error).message);
       process.exitCode = 1;

@@ -15,6 +15,7 @@
   "dependencies": {
     "@invariant/agent-driver": "*",
     "@invariant/mcp-proxy": "*",
+    "@invariant/scoring": "*",
     "@invariant/toy-tool-server": "*",
     "@invariant/trace-store": "*",
     "commander": "^12.1.0",

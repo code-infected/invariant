@@ -4,10 +4,29 @@ import { z } from "zod";
  * invariant.config.yaml (internal-docs/TECHNICAL_SPEC.md section 6).
  *
  * Only the keys something actually reads are validated strictly; the rest of the file
- * (judge, storage, export) passes through untouched until the code that uses it exists,
- * so a config written for a later milestone does not fail validation today.
+ * (storage, export) passes through untouched until the code that uses it exists, so a
+ * config written for a later milestone does not fail validation today.
  */
 export const RetryOnSchema = z.union([z.number().int().min(100).max(599), z.literal("timeout")]);
+
+/**
+ * The outcome-axis judge. Every key is optional so a config without a judge section still
+ * works; the defaults are the ones the design fixes (temperature 0, majority of 3, the
+ * 0.95 / 0.40 pre-filter band). model defaults to @invariant/scoring's DEFAULT_JUDGE_MODEL.
+ * The pre-filter thresholds are read but inert until an embedding provider is wired in.
+ */
+export const JudgeConfigSchema = z
+  .object({
+    model: z.string().min(1).optional(),
+    temperature: z.number().min(0).max(1).default(0),
+    votes: z.number().int().min(1).default(3),
+    embedding_prefilter_threshold_high: z.number().min(0).max(1).default(0.95),
+    embedding_prefilter_threshold_low: z.number().min(0).max(1).default(0.4),
+  })
+  .passthrough()
+  .refine((j) => j.embedding_prefilter_threshold_low <= j.embedding_prefilter_threshold_high, {
+    message: "embedding_prefilter_threshold_low must not exceed embedding_prefilter_threshold_high",
+  });
 
 export const InvariantConfigSchema = z
   .object({
@@ -27,6 +46,7 @@ export const InvariantConfigSchema = z
         default_tier: z.enum(["smoke", "full"]),
       })
       .passthrough(),
+    judge: JudgeConfigSchema.default({}),
   })
   .passthrough();
 

@@ -91,3 +91,15 @@ export function loadTask(name: string): LoadedTask {
 export function loadAllTasks(): LoadedTask[] {
   return listTaskNames().map(loadTask);
 }
+
+/** Load a task and refuse to go further if it does not validate (warnings are fine). */
+export function loadValidTask(name: string): LoadedTask {
+  const task = loadTask(name);
+  const hardErrors = task.errors.filter((e) => !e.startsWith("warning:"));
+  if (hardErrors.length > 0) {
+    throw new Error(
+      `task "${name}" is not valid, refusing to use it:\n` + hardErrors.map((e) => `  - ${e}`).join("\n")
+    );
+  }
+  return task;
+}

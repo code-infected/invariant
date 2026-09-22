@@ -50,6 +50,33 @@ export interface BatchRow {
   finished_at: string | null;
 }
 
+export interface RecordScoreInput {
+  task_id: string;
+  evaluation_batch_id: string;
+  /** Null when the axis was not computed or had too few runs. */
+  outcome_consistency: number | null;
+  tool_path_consistency: number | null;
+  state_mutation_consistency: number | null;
+  /** Adversarial mode only; null otherwise. */
+  injection_propagated?: boolean | null;
+  runs_scored: number;
+  /** Everything needed to explain the numbers later. Stored as JSON. */
+  details: unknown;
+}
+
+export interface ScoreRow {
+  id: string;
+  task_id: string;
+  evaluation_batch_id: string;
+  outcome_consistency: number | null;
+  tool_path_consistency: number | null;
+  state_mutation_consistency: number | null;
+  injection_propagated: boolean | null;
+  runs_scored: number;
+  details: unknown;
+  computed_at: string;
+}
+
 export interface DangerousToolSpec {
   name: string;
   sandbox_response: string;
@@ -361,6 +388,62 @@ export class TraceStore {
       ? "select * from runs where batch_id = ? order by trial_number, variant_id, attempt"
       : "select * from runs where batch_id = ? and superseded = 0 order by trial_number, variant_id";
     return (this.db.prepare(sql).all(batchId) as RawRunRow[]).map(toRunRow);
+  }
+
+  /**
+   * The task's most recent batch by creation time. With finishedOnly, skips batches still
+   * in flight (or whose process died before finishBatch), whose matrix may be partial.
+   */
+  getLatestBatch(taskId: string, options: { finishedOnly?: boolean } = {}): BatchRow | null {
+    const sql = options.finishedOnly
+      ? "select id from batches where task_id = ? and finished_at is not null order by created_at desc limit 1"
+      : "select id from batches where task_id = ? order by created_at desc limit 1";
+    const row = this.db.prepare(sql).get(taskId) as { id: string } | undefined;
+    return row ? this.getBatch(row.id) : null;
+  }
+
+  /** Append one scoring of a batch. Earlier scorings of the same batch are kept as history. */
+  recordScore(input: RecordScoreInput): string {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `insert into scores (id, task_id, evaluation_batch_id, outcome_consistency, tool_path_consistency,
+           state_mutation_consistency, injection_propagated, runs_scored, details, computed_at)
+         values (@id, @task_id, @evaluation_batch_id, @outcome_consistency, @tool_path_consistency,
+           @state_mutation_consistency, @injection_propagated, @runs_scored, @details, @computed_at)`
+      )
+      .run({
+        id,
+        task_id: input.task_id,
+        evaluation_batch_id: input.evaluation_batch_id,
+        outcome_consistency: input.outcome_consistency,
+        tool_path_consistency: input.tool_path_consistency,
+        state_mutation_consistency: input.state_mutation_consistency,
+        injection_propagated:
+          input.injection_propagated === undefined || input.injection_propagated === null
+            ? null
+            : input.injection_propagated
+              ? 1
+              : 0,
+        runs_scored: input.runs_scored,
+        details: toJson(input.details),
+        // Millisecond ISO timestamps can collide for two scorings in the same ms; the
+        // insertion-order tiebreak in getScores keeps "newest first" well defined anyway.
+        computed_at: new Date().toISOString(),
+      });
+    return id;
+  }
+
+  /** Every scoring of a batch, newest first. */
+  getScores(batchId: string): ScoreRow[] {
+    const rows = this.db
+      .prepare("select * from scores where evaluation_batch_id = ? order by computed_at desc, rowid desc")
+      .all(batchId) as Array<Omit<ScoreRow, "details" | "injection_propagated"> & { details: string; injection_propagated: number | null }>;
+    return rows.map((row) => ({
+      ...row,
+      injection_propagated: row.injection_propagated === null ? null : row.injection_propagated === 1,
+      details: fromJson(row.details),
+    }));
   }
 
   /** Flag an attempt as replaced by an infra retry. Only a completed infra_error may be. */
