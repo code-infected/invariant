@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "tsx src/index.ts",
     "validate": "tsx src/index.ts validate",
-    "test": "node --test \"dist/**/*.test.js\""
+    "test": "node --test \"dist/**/*.test.js\"",
+    "schema:trial-trace": "tsx src/schema/write-trial-trace-schema.ts"
   },
   "dependencies": {
     "@invariant/agent-driver": "*",
@@ -25,6 +26,7 @@
   "devDependencies": {
     "@types/node": "^22.5.0",
     "tsx": "^4.16.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "zod-to-json-schema": "^3.25.2"
   }
 }

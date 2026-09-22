@@ -1,0 +1,61 @@
+# The LangGraph adapter (adapters/langgraph): its pytest suite, and the adapter-agnostic
+# proof end to end. The proof is SYNTHETIC (a scripted chat model, not a model, drives the
+# real LangGraph example graph) and needs no secrets: the Python adapter writes trace
+# files, `invariant ingest` imports them, and the unchanged scoring engine and gate must
+# find the Princeton refund inconsistency (state-mutation 0.6 < 1.0, gate exit 1).
+name: langgraph-adapter
+
+on:
+  pull_request:
+    paths: ["adapters/langgraph/**", "schemas/**", "packages/**", "tasks/**", ".github/workflows/langgraph-adapter.yml"]
+  push:
+    branches: [main]
+    paths: ["adapters/langgraph/**", "schemas/**", "packages/**", "tasks/**", ".github/workflows/langgraph-adapter.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install the adapter
+        run: pip install -e "adapters/langgraph[dev]"
+
+      - name: pytest
+        working-directory: adapters/langgraph
+        run: python -m pytest -q
+
+      - name: Build the TypeScript CLI
+        run: npm ci && npm run build
+
+      - name: "SYNTHETIC proof, LangGraph trace files through the unchanged scorer and gate"
+        run: |
+          set -u
+          out="$RUNNER_TEMP/lg-traces"; store="$RUNNER_TEMP/lg-store"
+          invariant-langgraph run --task refund-duplicate-check --tier smoke --variants v1 --trials 5 \
+            --graph invariant_langgraph.examples.refund:build_graph \
+            --tools invariant_langgraph.examples.refund:make_tools \
+            --model-factory invariant_langgraph.examples.refund_scripted:princeton_model \
+            --out "$out"
+          node packages/cli/dist/index.js ingest --task=refund-duplicate-check --tier=smoke --store="$store" "$out"
+          set +e
+          node packages/cli/dist/index.js gate --task=refund-duplicate-check --store="$store" \
+            --allow-uncomputed=outcome --report="$RUNNER_TEMP/gate.json"
+          code=$?
+          set -e
+          sm=$(node -e 'const r=require(process.argv[1]);console.log(r.tasks[0].axes.find(a=>a.axis==="state_mutation").score)' "$RUNNER_TEMP/gate.json")
+          echo "gate exit $code, state-mutation $sm"
+          test "$code" = 1 && test "$sm" = 0.6

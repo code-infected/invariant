@@ -8,6 +8,7 @@ import { runScore } from "./commands/score.js";
 import { runGate } from "./commands/gate.js";
 import { runDemoSeed } from "./commands/demo-seed.js";
 import { runDashboard } from "./commands/dashboard.js";
+import { runIngest } from "./commands/ingest.js";
 
 const program = new Command();
 
@@ -143,6 +144,27 @@ program
       // Bad arguments or an unreadable store: the gate could not evaluate anything.
       console.error((err as Error).message);
       process.exitCode = 2;
+    }
+  });
+
+program
+  .command("ingest")
+  .description(
+    "Import trial trace files written by an out-of-process adapter (e.g. adapters/langgraph) into the trace " +
+      "store as one batch. Every file is validated first (schemas/trial-trace.v1.schema.json, the task spec, " +
+      "the variant fixture, a complete run matrix, dangerous tools sandboxed); if any check fails nothing is written."
+  )
+  .argument("<paths...>", "trace files, or directories of *.json trace files")
+  .requiredOption("--task <name>", "task name (matches tasks/<name>.yaml)")
+  .addOption(new Option("--tier <tier>", "the tier the files were run as").choices(["smoke", "full"]).makeOptionMandatory())
+  .option("--json", "print the ingest summary as JSON", false)
+  .option("--store <path>", "trace store directory holding trace.db (default: .invariant at the repo root)")
+  .action((paths: string[], opts) => {
+    try {
+      runIngest({ task: opts.task, tier: opts.tier, paths, json: Boolean(opts.json) }, { storeRoot: opts.store });
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
     }
   });
 
