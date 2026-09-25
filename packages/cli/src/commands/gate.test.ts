@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { openTraceStore, type TraceStore } from "@invariant/trace-store";
 import type { JudgeFn } from "@invariant/scoring";
-import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { runGate, PR_COMMENT_MARKER, type EvaluatedTaskReport, type GateDeps, type GateOptions, type StateMutationEvidence } from "./gate.js";
 import { consistentDeclineScript, writePrincetonBatch, writeScriptedBatch } from "./princeton-fixture.js";
 import { syncTask } from "./run.js";
@@ -41,7 +41,7 @@ const show = (lines: string[]) => {
 describe("invariant gate on SYNTHETIC batches (scripted stand-in, not a live model)", () => {
   let root: string;
   let store: TraceStore;
-  let task: LoadedTask;
+  let task: ValidTask;
   let restoreCredentials: () => void = () => undefined;
   const batches = { identical: "", reworded: "", princeton: "", code: "", research: "" };
 

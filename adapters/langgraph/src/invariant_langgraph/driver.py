@@ -314,6 +314,7 @@ def run_cell(
         "latency_ms": latency_ms,
         "usage": {"input_tokens": recorder.input_tokens, "output_tokens": recorder.output_tokens},
         "fingerprint": fingerprint,
+        **({"params_sent": recorder.sampling_params} if recorder.sampling_params else {}),
         "tool_calls": recorder.tool_calls,
         "messages": _jsonable(messages_to_dict(messages)),
     }

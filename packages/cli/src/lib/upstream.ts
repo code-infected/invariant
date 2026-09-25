@@ -3,7 +3,7 @@ import path from "node:path";
 import { listUpstreamTools } from "@invariant/agent-driver";
 import type { UpstreamConfig } from "@invariant/mcp-proxy";
 import type { ToyServerName } from "@invariant/toy-tool-server";
-import type { LoadedTask } from "./load-tasks.js";
+import type { ValidTask } from "./load-tasks.js";
 import { REPO_ROOT } from "./paths.js";
 
 const require_ = createRequire(import.meta.url);
@@ -97,7 +97,7 @@ export type UpstreamResolver = (taskName: string) => TaskUpstream | null;
  * server is asked for its tool list once.
  */
 export async function toolCoverage(
-  tasks: readonly LoadedTask[],
+  tasks: readonly ValidTask[],
   resolve: UpstreamResolver = upstreamForTask
 ): Promise<Map<string, CoverageGap>> {
   const servedBy = new Map<string, Promise<string[]>>();

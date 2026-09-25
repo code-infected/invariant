@@ -24,7 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { runBatch, scriptedResponse, type BatchSummary, type CallModel, type ChatResponse } from "@invariant/agent-driver";
 import type { TraceStore } from "@invariant/trace-store";
-import type { LoadedTask } from "../lib/load-tasks.js";
+import type { ValidTask } from "../lib/load-tasks.js";
 import { requireUpstream } from "../lib/upstream.js";
 import { syncTask } from "./run.js";
 
@@ -141,7 +141,7 @@ const REWORDED_DECLINES = [
  */
 export async function writePrincetonBatch(
   store: TraceStore,
-  task: LoadedTask,
+  task: ValidTask,
   toyEnv: Record<string, string> = {}
 ): Promise<BatchSummary> {
   return writeScriptedBatch(store, task, princetonScript(), PRINCETON_TRIALS, toyEnv);
@@ -154,7 +154,7 @@ export async function writePrincetonBatch(
  */
 export async function writeScriptedBatch(
   store: TraceStore,
-  task: LoadedTask,
+  task: ValidTask,
   callModel: CallModel,
   trials: number,
   toyEnv: Record<string, string> = {}

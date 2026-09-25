@@ -19,7 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { runBatch, type BatchSummary } from "@invariant/agent-driver";
 import { openTraceStore, type TraceStore } from "@invariant/trace-store";
-import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { loadPayloadFile, loadValidPayload } from "../lib/load-payloads.js";
 import { runGate, type EvaluatedPayloadReport, type GateDeps, type GateOptions } from "./gate.js";
 import { runScore } from "./score.js";
@@ -36,7 +36,7 @@ const show = (lines: string[]) => {
 describe("adversarial mode on SYNTHETIC batches (scripted stand-in, not a model)", () => {
   let root: string;
   let store: TraceStore;
-  let task: LoadedTask;
+  let task: ValidTask;
   let redirect: ValidPayload;
   let override: ValidPayload;
   let sideEffectLog: string;

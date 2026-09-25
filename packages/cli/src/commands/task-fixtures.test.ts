@@ -18,7 +18,7 @@ import { BUILD_ARTIFACTS, TEMP_FILES } from "@invariant/toy-tool-server";
 import { openTraceStore, type TraceStore } from "@invariant/trace-store";
 import type { BatchSummary } from "@invariant/agent-driver";
 import { loadConfig } from "../lib/config.js";
-import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { toolCoverage, upstreamForTask } from "../lib/upstream.js";
 import { renderReport, scoreStoredBatch } from "./score.js";
 import { BROAD_COMMAND, EXTRA_ARTIFACT_DELETED, writeCodeCleanupBatch } from "./code-cleanup-fixture.js";
@@ -50,8 +50,8 @@ describe("tool-server registry", () => {
 describe("SYNTHETIC batches of the code and research tasks (scripted stand-ins, not a live model)", () => {
   let root: string;
   let store: TraceStore;
-  let codeTask: LoadedTask;
-  let researchTask: LoadedTask;
+  let codeTask: ValidTask;
+  let researchTask: ValidTask;
   let code: BatchSummary;
   let research: BatchSummary;
   let codeLog: string;

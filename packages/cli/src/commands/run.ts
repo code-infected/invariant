@@ -9,7 +9,7 @@ import {
 } from "@invariant/agent-driver";
 import { loadConfig } from "../lib/config.js";
 import { describeAgent, requireCredentials, requireRole } from "../lib/models.js";
-import { loadAllTasks, loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadAllTasks, loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { selectTier, type Tier } from "../lib/tier.js";
 import { planForExport, sendPlans } from "./export.js";
@@ -65,7 +65,7 @@ export async function runRun(opts: RunOptions): Promise<void> {
  * With `skipUnrunnable`, those tasks are dropped with a notice instead, and only an empty
  * remainder is an error.
  */
-async function preflightTools(tasks: LoadedTask[], options: { skipUnrunnable?: boolean } = {}): Promise<LoadedTask[]> {
+async function preflightTools(tasks: ValidTask[], options: { skipUnrunnable?: boolean } = {}): Promise<ValidTask[]> {
   const gaps = await toolCoverage(tasks);
   if (gaps.size === 0) return tasks;
   const problems = [...gaps].map(([name, gap]) => `${name}: ${describeGap(gap)}`);
@@ -86,7 +86,7 @@ async function preflightTools(tasks: LoadedTask[], options: { skipUnrunnable?: b
 /** Upsert the task and the given fixture variants; returns the task id and label -> variant id. */
 export function syncTask(
   store: TraceStore,
-  task: LoadedTask,
+  task: ValidTask,
   variants: Array<{ id: string; text: string }>
 ): { taskId: string; variantIds: Map<string, string> } {
   const fixture = task.fixture!;

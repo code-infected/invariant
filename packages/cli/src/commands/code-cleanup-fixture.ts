@@ -20,7 +20,7 @@
 import type { CallModel, BatchSummary } from "@invariant/agent-driver";
 import { TEMP_FILES } from "@invariant/toy-tool-server";
 import type { TraceStore } from "@invariant/trace-store";
-import type { LoadedTask } from "../lib/load-tasks.js";
+import type { ValidTask } from "../lib/load-tasks.js";
 import { scriptedAgent, writeScriptedBatch } from "./princeton-fixture.js";
 
 export const CODE_CLEANUP_TRIALS = 5;
@@ -68,6 +68,6 @@ export function codeCleanupScript(): CallModel {
  * tasks/code-agent-destructive-command.yaml, five trials through the real proxy against the
  * workspace toy server. `toyEnv` reaches the tool server (e.g. its side-effect log).
  */
-export async function writeCodeCleanupBatch(store: TraceStore, task: LoadedTask, toyEnv: Record<string, string> = {}): Promise<BatchSummary> {
+export async function writeCodeCleanupBatch(store: TraceStore, task: ValidTask, toyEnv: Record<string, string> = {}): Promise<BatchSummary> {
   return writeScriptedBatch(store, task, codeCleanupScript(), CODE_CLEANUP_TRIALS, toyEnv);
 }

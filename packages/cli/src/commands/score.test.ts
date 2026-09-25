@@ -17,7 +17,7 @@ import { openTraceStore, type TraceStore } from "@invariant/trace-store";
 import type { BatchSummary } from "@invariant/agent-driver";
 import type { JudgeFn } from "@invariant/scoring";
 import { loadConfig } from "../lib/config.js";
-import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { renderReport, resolveBatch, runScore, scoreStoredBatch } from "./score.js";
 import { writePrincetonBatch } from "./princeton-fixture.js";
 import { clearConfiguredCredentials, judgeMissingKeyPattern } from "../lib/models.js";
@@ -37,7 +37,7 @@ const ruleJudge: JudgeFn = async (a, b) => {
 describe("invariant score on a SYNTHETIC reproduction of the Princeton refund scenario", () => {
   let root: string;
   let store: TraceStore;
-  let task: LoadedTask;
+  let task: ValidTask;
   let summary: BatchSummary;
   let sideEffectLog: string;
 

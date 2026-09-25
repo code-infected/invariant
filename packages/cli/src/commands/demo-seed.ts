@@ -47,7 +47,7 @@ import {
 import { openTraceStore, type TraceStore } from "@invariant/trace-store";
 import { loadConfig } from "../lib/config.js";
 import { clearConfiguredCredentials } from "../lib/models.js";
-import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR } from "../lib/paths.js";
 import { syncTask } from "./run.js";
 import { scoreStoredBatch } from "./score.js";
@@ -284,7 +284,7 @@ export async function runDemoSeed(opts: DemoSeedOptions): Promise<DemoSeedResult
   return { store: root, batches };
 }
 
-async function writeScenarioBatch(store: TraceStore, task: LoadedTask, scenario: Scenario): Promise<string> {
+async function writeScenarioBatch(store: TraceStore, task: ValidTask, scenario: Scenario): Promise<string> {
   const variants = DEMO_VARIANTS.map((id) => {
     const v = task.fixture!.variants.find((x) => x.id === id);
     if (!v) throw new Error(`demo-seed: ${DEMO_TASK} fixture has no variant ${id}`);

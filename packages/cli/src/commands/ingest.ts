@@ -35,7 +35,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { computeDeploymentFingerprint, isScriptedStandIn, openTraceStore, type Tier } from "@invariant/trace-store";
 import { canonicalJson } from "@invariant/scoring";
-import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { selectTier } from "../lib/tier.js";
 import { TrialTraceSchema, type TrialTrace } from "../schema/trial-trace.js";
@@ -140,7 +140,7 @@ export function parseTraceFiles(files: string[]): LoadedFile[] {
 /** The checks that need the task, the fixture, or the other files. Returns problems and warnings. */
 export function checkBatch(
   files: LoadedFile[],
-  task: LoadedTask,
+  task: ValidTask,
   tier: Tier
 ): { problems: string[]; warnings: string[] } {
   const problems: string[] = [];

@@ -341,6 +341,11 @@
         "additionalProperties": false
       }
     },
+    "params_sent": {
+      "type": "object",
+      "additionalProperties": {},
+      "description": "Sampling params (temperature, max_tokens, ...) the adapter sent on the run's first model call, if any were set. Informational only, kept in the raw trace; never part of the deployment fingerprint, since the harness does not require every deployment to pin them the same way. Omitted when the adapter cannot observe them or none were sent."
+    },
     "messages": {
       "type": "array",
       "items": {},

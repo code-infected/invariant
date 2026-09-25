@@ -1,6 +1,11 @@
 # Local-only reference material. Never committed.
 internal-docs/
 
+# Local screenshots (README reference shots, chat exports). Not part of the published repo;
+# was only excluded locally via .git/info/exclude before, so a fresh clone or another
+# contributor's working copy would not have ignored it.
+Claude outputs/
+
 # node
 node_modules/
 dist/

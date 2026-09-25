@@ -19,7 +19,7 @@ import {
 import { loadConfig } from "../lib/config.js";
 import { roleMissingKeyMessage, roleSpec } from "../lib/models.js";
 import { credentialStatus } from "@invariant/providers";
-import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR, REPO_ROOT } from "../lib/paths.js";
 import { batchFingerprints, fingerprintLines, mixedFingerprintWarning, type BatchFingerprintSummary } from "../lib/fingerprints.js";
 import type { InvariantConfig } from "../schema/config.js";
@@ -77,7 +77,7 @@ export interface StoredScore {
   warnings: string[];
 }
 
-export function scoringTask(task: LoadedTask): ScoringTask {
+export function scoringTask(task: ValidTask): ScoringTask {
   return {
     name: task.spec.name,
     success_rubric: task.spec.success_rubric,
@@ -93,7 +93,7 @@ export function scoringTask(task: LoadedTask): ScoringTask {
  * ran; if the parts that change what gets scored differ, say so rather than silently
  * scoring an old batch against new rules.
  */
-export function specDrift(store: TraceStore, taskId: string, task: LoadedTask): string[] {
+export function specDrift(store: TraceStore, taskId: string, task: ValidTask): string[] {
   const row = store.getTask(taskId);
   if (!row) return [];
   const changed: string[] = [];
@@ -109,7 +109,7 @@ export function specDrift(store: TraceStore, taskId: string, task: LoadedTask): 
 }
 
 /** Resolve which batch to score and the task spec it is scored against. */
-export function resolveBatch(store: TraceStore, opts: Pick<ScoreOptions, "batch" | "task">): { batch: BatchRow; task: LoadedTask } {
+export function resolveBatch(store: TraceStore, opts: Pick<ScoreOptions, "batch" | "task">): { batch: BatchRow; task: ValidTask } {
   if ((opts.batch === undefined) === (opts.task === undefined)) {
     throw new Error("pass exactly one of --batch=<batch_id> or --task=<name> (scores that task's most recent finished batch).");
   }
@@ -209,7 +209,7 @@ function judgeKey(judge: JudgeSettings, spec: ModelSpec | null): Record<string, 
  * gate can reuse a score only when it would compute the same numbers again.
  */
 export function scoringKey(
-  task: LoadedTask,
+  task: ValidTask,
   judge: JudgeSettings,
   config: InvariantConfig,
   deps: Pick<ScoreDeps, "embed" | "judgeModel">
@@ -241,7 +241,7 @@ function buildEmbedderModel(config: InvariantConfig, deps: Pick<ScoreDeps, "embe
 export async function scoreStoredBatch(
   store: TraceStore,
   batch: BatchRow,
-  task: LoadedTask,
+  task: ValidTask,
   config: InvariantConfig,
   deps: ScoreDeps = {}
 ): Promise<StoredScore> {

@@ -94,7 +94,9 @@ export function loadPayloadFile(file: string): LoadedPayload {
   if (taskErrors.length > 0) {
     out.errors.push(`base task "${p.task}" is not valid: ${taskErrors.join("; ")}`);
   } else {
-    out.errors.push(...checkPayloadAgainstTask(p, task.spec));
+    // taskErrors.length === 0 here only when loadTask actually parsed the spec (same
+    // condition loadValidTask checks), so this is non-null.
+    out.errors.push(...checkPayloadAgainstTask(p, task.spec!));
   }
   return out;
 }

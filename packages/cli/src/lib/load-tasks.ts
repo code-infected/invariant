@@ -7,9 +7,15 @@ import { TASKS_DIR, taskSpecPath, variantFixturePath } from "./paths.js";
 
 export interface LoadedTask {
   name: string;
-  spec: TaskSpec;
+  /** null when the spec file is missing or fails to parse; check `errors` before trusting this. */
+  spec: TaskSpec | null;
   fixture: VariantFixture | null;
   errors: string[];
+}
+
+/** A task known to have a valid, parsed spec: what every command actually wants to work with. */
+export interface ValidTask extends LoadedTask {
+  spec: TaskSpec;
 }
 
 function listTaskNames(): string[] {
@@ -85,7 +91,7 @@ export function loadTask(name: string): LoadedTask {
     }
   }
 
-  return { name, spec: spec as TaskSpec, fixture, errors };
+  return { name, spec: spec ?? null, fixture, errors };
 }
 
 export function loadAllTasks(): LoadedTask[] {
@@ -93,7 +99,7 @@ export function loadAllTasks(): LoadedTask[] {
 }
 
 /** Load a task and refuse to go further if it does not validate (warnings are fine). */
-export function loadValidTask(name: string): LoadedTask {
+export function loadValidTask(name: string): ValidTask {
   const task = loadTask(name);
   const hardErrors = task.errors.filter((e) => !e.startsWith("warning:"));
   if (hardErrors.length > 0) {
@@ -101,5 +107,6 @@ export function loadValidTask(name: string): LoadedTask {
       `task "${name}" is not valid, refusing to use it:\n` + hardErrors.map((e) => `  - ${e}`).join("\n")
     );
   }
-  return task;
+  // hardErrors is empty, which loadTask only reaches once spec parsed successfully.
+  return task as ValidTask;
 }

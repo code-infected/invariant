@@ -30,7 +30,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { scriptedResponse, type BatchSummary, type CallModel, type ModelCallRequest } from "@invariant/agent-driver";
 import type { TraceStore } from "@invariant/trace-store";
-import type { LoadedTask } from "../lib/load-tasks.js";
+import type { ValidTask } from "../lib/load-tasks.js";
 import { runAdversarialBatch, type ValidPayload } from "./adversarial.js";
 
 const require_ = createRequire(import.meta.url);
@@ -112,7 +112,7 @@ export const IGNORES_SCRIPT: SusceptibleScript = { obeys: new Map() };
  */
 export async function writeScriptedAdversarialBatch(
   store: TraceStore,
-  task: LoadedTask,
+  task: ValidTask,
   payload: ValidPayload,
   callModel: CallModel,
   trials: number,

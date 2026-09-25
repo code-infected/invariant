@@ -91,6 +91,19 @@ export function bedrockError(provider: string, err: unknown): ProviderError {
   });
 }
 
+/**
+ * `BedrockRuntimeClientResolvedConfig` is a deep intersection of the SDK's and Smithy's
+ * resolved-config interfaces; `region` and `credentials` are real properties on it at
+ * runtime (verified against the pinned @aws-sdk/client-bedrock-runtime + @smithy/core: both
+ * resolve to functions on a live client), but `keyof` over that many intersected, partly
+ * generic interfaces collapses to `never` in ts(5.9), so `Pick` can't name them either.
+ * `sdk.config` is read through this hand-written, accurate view instead of `any`.
+ */
+interface BedrockResolvedConfig {
+  region(): Promise<string | undefined>;
+  credentials(): Promise<unknown>;
+}
+
 export function createBedrockClient(m: ResolvedModel): ModelClient {
   const sdk = new BedrockRuntimeClient({
     maxAttempts: 1,
@@ -98,11 +111,12 @@ export function createBedrockClient(m: ResolvedModel): ModelClient {
     ...(m.region !== undefined ? { region: m.region } : {}),
     ...(m.base_url ? { endpoint: m.base_url } : {}),
   });
+  const resolvedConfig = sdk.config as unknown as BedrockResolvedConfig;
   let endpoint = m.endpoint;
   async function resolveEndpoint(): Promise<string | null> {
     if (endpoint) return endpoint;
     try {
-      const region = await sdk.config.region();
+      const region = await resolvedConfig.region();
       endpoint = region ? `bedrock-runtime.${region}.amazonaws.com` : null;
     } catch {
       endpoint = null;
@@ -171,9 +185,9 @@ export function createBedrockClient(m: ResolvedModel): ModelClient {
       };
     },
     async checkCredentials(): Promise<void> {
-      const region = await sdk.config.region();
+      const region = await resolvedConfig.region();
       if (!region) throw new Error("no AWS region: set AWS_REGION or models.<role>.region");
-      await sdk.config.credentials();
+      await resolvedConfig.credentials();
     },
     async embed(texts: string[], signal?: AbortSignal): Promise<EmbedResponse> {
       const cohere = m.model.includes("cohere.");

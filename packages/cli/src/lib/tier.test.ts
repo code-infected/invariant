@@ -1,7 +1,7 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { selectTier } from "./tier.js";
-import { loadAllTasks } from "./load-tasks.js";
+import { loadAllTasks, loadValidTask } from "./load-tasks.js";
 import type { TaskSpec } from "../schema/task-spec.js";
 import type { VariantFixture } from "../schema/variant-fixture.js";
 
@@ -60,7 +60,7 @@ describe("selectTier", () => {
   });
 
   test("the committed example tasks resolve to the counts their specs declare", () => {
-    const tasks = loadAllTasks();
+    const tasks = loadAllTasks().map((t) => loadValidTask(t.name));
     assert.ok(tasks.length >= 3);
     for (const task of tasks) {
       for (const tier of ["smoke", "full"] as const) {

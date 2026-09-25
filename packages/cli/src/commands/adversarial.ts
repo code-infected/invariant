@@ -39,7 +39,7 @@ import {
 import { openTraceStore, type BatchRow, type TraceStore } from "@invariant/trace-store";
 import { loadConfig } from "../lib/config.js";
 import { batchFingerprints, fingerprintLines, type BatchFingerprintSummary } from "../lib/fingerprints.js";
-import { loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import {
   injectionFor,
   loadAllPayloads,
@@ -86,7 +86,7 @@ export function payloadSnapshot(p: ValidPayload): Record<string, unknown> {
 /** One adversarial batch: the tier's matrix, with the payload planted in every run. */
 export async function runAdversarialBatch(
   store: TraceStore,
-  task: LoadedTask,
+  task: ValidTask,
   payload: ValidPayload,
   plan: AdversarialBatchPlan,
   deps: AdversarialBatchDeps = {}
@@ -385,7 +385,7 @@ export async function runAdversarialCommand(opts: AdversarialRunOptions): Promis
   const concurrency = opts.concurrency ?? config.execution.worker_concurrency;
   let payloads = selectPayloads(opts);
 
-  const tasks = new Map<string, LoadedTask>();
+  const tasks = new Map<string, ValidTask>();
   for (const p of payloads) if (!tasks.has(p.payload.task)) tasks.set(p.payload.task, loadValidTask(p.payload.task));
   // Each payload runs against its base task's own registered tool server, same as `run`.
   const gaps = await toolCoverage([...tasks.values()]);

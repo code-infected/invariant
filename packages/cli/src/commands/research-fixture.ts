@@ -13,7 +13,7 @@
  */
 import type { CallModel, BatchSummary } from "@invariant/agent-driver";
 import type { TraceStore } from "@invariant/trace-store";
-import type { LoadedTask } from "../lib/load-tasks.js";
+import type { ValidTask } from "../lib/load-tasks.js";
 import { scriptedAgent, writeScriptedBatch } from "./princeton-fixture.js";
 
 export const RESEARCH_TRIALS = 5;
@@ -39,6 +39,6 @@ export function researchScript(): CallModel {
 }
 
 /** Five trials of v1 of the real tasks/research-citation-integrity.yaml, through the real proxy. */
-export async function writeResearchBatch(store: TraceStore, task: LoadedTask, toyEnv: Record<string, string> = {}): Promise<BatchSummary> {
+export async function writeResearchBatch(store: TraceStore, task: ValidTask, toyEnv: Record<string, string> = {}): Promise<BatchSummary> {
   return writeScriptedBatch(store, task, researchScript(), RESEARCH_TRIALS, toyEnv);
 }

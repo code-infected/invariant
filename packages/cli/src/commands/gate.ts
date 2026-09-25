@@ -119,7 +119,7 @@ import {
   type GateVerdict,
 } from "@invariant/scoring";
 import { loadConfig } from "../lib/config.js";
-import { loadAllTasks, loadValidTask, type LoadedTask } from "../lib/load-tasks.js";
+import { loadAllTasks, loadValidTask, type ValidTask } from "../lib/load-tasks.js";
 import { INVARIANT_DIR } from "../lib/paths.js";
 import { describeGap, toolCoverage, type CoverageGap, type UpstreamResolver } from "../lib/upstream.js";
 import { batchFingerprints, fingerprintLines, mixedFingerprintWarning, type BatchFingerprintSummary } from "../lib/fingerprints.js";
@@ -391,7 +391,7 @@ function buildEvidence(axis: AxisName, gs: GateScore): AxisEvidence {
 async function gateBatch(
   store: TraceStore,
   batch: BatchRow,
-  task: LoadedTask,
+  task: ValidTask,
   config: InvariantConfig,
   deps: GateDeps,
   opts: { allowUncomputed: AxisName[]; rescore: boolean },
@@ -441,7 +441,7 @@ async function gateBatch(
  * A task's latest batch, for gating. Fails closed on an unfinished latest batch rather
  * than quietly gating an older finished one in its place.
  */
-function latestBatchForGate(store: TraceStore, task: LoadedTask, runnableHint: string): BatchRow {
+function latestBatchForGate(store: TraceStore, task: ValidTask, runnableHint: string): BatchRow {
   const row = store.getTaskByName(task.spec.name);
   const latest = row ? store.getLatestBatch(row.id) : null;
   if (!latest) {
@@ -524,7 +524,7 @@ function gateAdversarialBatch(store: TraceStore, batch: BatchRow, rescore: boole
  */
 function gatePayloads(
   store: TraceStore,
-  inScope: Map<string, { task: LoadedTask | null; unrunnable: string | null }>,
+  inScope: Map<string, { task: ValidTask | null; unrunnable: string | null }>,
   opts: { requireAdversarial: boolean; rescore: boolean }
 ): PayloadGateReport[] {
   const out: PayloadGateReport[] = [];
@@ -628,7 +628,7 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
         }
       }
     } else if (mode === "task") {
-      let loaded: LoadedTask | null = null;
+      let loaded: ValidTask | null = null;
       try {
         loaded = loadValidTask(opts.task!);
         tasks.push(await gateBatch(store, latestBatchForGate(store, loaded, ""), loaded, config, deps, gateOpts));
@@ -639,7 +639,7 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
     } else {
       const all = loadAllTasks();
       if (all.length === 0) warnings.push("no task specs under tasks/: nothing to gate.");
-      const valid: LoadedTask[] = [];
+      const valid: ValidTask[] = [];
       for (const t of all) {
         try {
           valid.push(loadValidTask(t.name));
@@ -656,7 +656,7 @@ export async function runGate(opts: GateOptions, deps: GateDeps = {}): Promise<G
             `so a task without a batch counts as incomplete.`
         );
       }
-      const scope = new Map<string, { task: LoadedTask | null; unrunnable: string | null }>();
+      const scope = new Map<string, { task: ValidTask | null; unrunnable: string | null }>();
       for (const task of valid) {
         const gap = gaps.get(task.spec.name);
         scope.set(task.spec.name, {

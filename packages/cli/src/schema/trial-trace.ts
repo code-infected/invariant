@@ -125,6 +125,15 @@ export const TrialTraceSchema = z
       .nullable()
       .describe("Deployment fingerprint components; null when no model response arrived. Ingest computes the hash."),
     tool_calls: z.array(TraceToolCallSchema),
+    params_sent: z
+      .record(z.string(), z.unknown())
+      .optional()
+      .describe(
+        "Sampling params (temperature, max_tokens, ...) the adapter sent on the run's first model call, if any " +
+          "were set. Informational only, kept in the raw trace; never part of the deployment fingerprint, since " +
+          "the harness does not require every deployment to pin them the same way. Omitted when the adapter " +
+          "cannot observe them or none were sent."
+      ),
     messages: z.array(z.unknown()).optional().describe("Optional transcript, kept in the raw trace only"),
   })
   .strict();
